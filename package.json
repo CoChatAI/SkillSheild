@@ -1,0 +1,18 @@
+{
+  "name": "skillshield",
+  "private": true,
+  "packageManager": "pnpm@10.6.3",
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "lint": "turbo run lint"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.14",
+    "@cloudflare/workers-types": "^4.20260316.0",
+    "turbo": "^2.5.0",
+    "typescript": "^5.8.2",
+    "vitest": "^3.1.1"
+  }
+}

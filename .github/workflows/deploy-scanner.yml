@@ -1,0 +1,98 @@
+name: Deploy Scanner
+
+on:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy the scanner to Fly after validation passes.
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Set up Flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Build scanner path
+        run: |
+          pnpm --filter @skillshield/shared build
+          pnpm --filter @skillshield/scanner build
+
+      - name: Typecheck scanner path
+        run: |
+          pnpm --filter @skillshield/shared typecheck
+          pnpm --filter @skillshield/scanner typecheck
+
+      - name: Test scanner path
+        run: |
+          pnpm --filter @skillshield/shared test
+          pnpm --filter @skillshield/scanner test
+
+      - name: Build production scanner image
+        run: docker build -f packages/scanner/Dockerfile -t skillshield-scanner:${{ github.sha }} .
+
+      - name: Validate Fly config file shape
+        run: |
+          test -f packages/scanner/fly.toml
+          grep '^app = "skillshield-scanner"' packages/scanner/fly.toml
+          grep '^\[build\]' packages/scanner/fly.toml
+          grep '^\[http_service\]' packages/scanner/fly.toml
+
+      - name: Validate Fly config with flyctl
+        if: ${{ env.FLY_API_TOKEN != '' }}
+        run: flyctl config validate -c packages/scanner/fly.toml
+
+      - name: Note skipped flyctl validation
+        if: ${{ env.FLY_API_TOKEN == '' }}
+        run: |
+          echo "FLY_API_TOKEN is not configured, so flyctl config validation was skipped."
+          echo "The scanner image build and checked-in fly.toml shape still validate the pre-secret path."
+
+  deploy:
+    if: ${{ inputs.deploy }}
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    env:
+      FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Flyctl
+        uses: superfly/flyctl-actions/setup-flyctl@master
+
+      - name: Require Fly deploy credential
+        run: test -n "$FLY_API_TOKEN"
+
+      - name: Deploy scanner to Fly
+        run: flyctl deploy --config packages/scanner/fly.toml --remote-only

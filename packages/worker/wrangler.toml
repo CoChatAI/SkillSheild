@@ -1,0 +1,73 @@
+name = "skillshield-worker"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+ENVIRONMENT = "local"
+SCANNER_BASE_URL = "http://127.0.0.1:3100"
+SCANNER_REQUEST_TIMEOUT_MS = "30000"
+
+[[r2_buckets]]
+binding = "SKILLS_BUCKET"
+bucket_name = "skillshield-skills"
+
+[[r2_buckets]]
+binding = "REPORTS_BUCKET"
+bucket_name = "skillshield-reports"
+
+[[r2_buckets]]
+binding = "META_BUCKET"
+bucket_name = "skillshield-meta"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "skillshield-db"
+database_id = "local-dev-placeholder"
+
+[[queues.producers]]
+queue = "scan-jobs"
+binding = "SCAN_QUEUE"
+
+[[queues.consumers]]
+queue = "scan-jobs"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 8
+retry_delay = 30
+
+[env.production]
+routes = ["skillshield.cochat.ai/*"]
+
+[env.production.vars]
+ENVIRONMENT = "production"
+SCANNER_BASE_URL = "https://skillshield-scanner.fly.dev"
+SCANNER_REQUEST_TIMEOUT_MS = "30000"
+
+[[env.production.r2_buckets]]
+binding = "SKILLS_BUCKET"
+bucket_name = "skillshield-skills"
+
+[[env.production.r2_buckets]]
+binding = "REPORTS_BUCKET"
+bucket_name = "skillshield-reports"
+
+[[env.production.r2_buckets]]
+binding = "META_BUCKET"
+bucket_name = "skillshield-meta"
+
+[[env.production.d1_databases]]
+binding = "DB"
+database_name = "skillshield-db"
+database_id = "terraform-output-placeholder"
+
+[[env.production.queues.producers]]
+queue = "scan-jobs"
+binding = "SCAN_QUEUE"
+
+[[env.production.queues.consumers]]
+queue = "scan-jobs"
+max_batch_size = 10
+max_batch_timeout = 5
+max_retries = 8
+retry_delay = 30

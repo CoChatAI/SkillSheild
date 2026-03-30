@@ -1,0 +1,7 @@
+services:
+  scanner:
+    build:
+      context: ..
+      dockerfile: packages/scanner/Dockerfile
+    ports:
+      - "3100:3100"

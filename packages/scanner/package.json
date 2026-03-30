@@ -1,0 +1,19 @@
+{
+  "name": "@skillshield/scanner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "smoke:clawhub-scrape": "node --experimental-strip-types scripts/full-scrape-clawhub.ts",
+    "smoke:skills-sh-scrape": "node --experimental-strip-types scripts/full-scrape-skills.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@skillshield/shared": "workspace:*",
+    "@hono/node-server": "^1.14.1",
+    "aws4fetch": "^1.0.20",
+    "hono": "^4.7.5"
+  }
+}

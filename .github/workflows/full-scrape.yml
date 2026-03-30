@@ -1,0 +1,138 @@
+name: Full Scrape
+
+on:
+  workflow_dispatch:
+    inputs:
+      execute:
+        description: Execute the scrape against a live scanner.
+        required: true
+        default: false
+        type: boolean
+      source:
+        description: Scanner source to scrape.
+        required: true
+        default: clawhub
+        type: choice
+        options:
+          - clawhub
+          - skills-sh
+      wait:
+        description: Wait for the scrape request to finish before the workflow exits.
+        required: true
+        default: true
+        type: boolean
+      limit:
+        description: Optional bounded scrape limit.
+        required: false
+        default: ''
+        type: string
+      delay_ms:
+        description: Optional delay between scan jobs in milliseconds.
+        required: false
+        default: '0'
+        type: string
+      use_llm:
+        description: Forward the useLlm flag to the scanner route.
+        required: true
+        default: false
+        type: boolean
+      base_url:
+        description: Optional scanner base URL override. Falls back to repository variable SCANNER_BASE_URL.
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      request_path: ${{ steps.build.outputs.request_path }}
+      endpoint: ${{ steps.build.outputs.endpoint }}
+      has_base_url: ${{ steps.build.outputs.has_base_url }}
+
+    steps:
+      - name: Build scrape request
+        id: build
+        env:
+          SOURCE: ${{ inputs.source }}
+          WAIT: ${{ inputs.wait }}
+          LIMIT: ${{ inputs.limit }}
+          DELAY_MS: ${{ inputs.delay_ms }}
+          USE_LLM: ${{ inputs.use_llm }}
+          INPUT_BASE_URL: ${{ inputs.base_url }}
+          REPOSITORY_BASE_URL: ${{ vars.SCANNER_BASE_URL }}
+        run: |
+          request_path="/scrape/${SOURCE}?wait=${WAIT}&useLlm=${USE_LLM}"
+
+          if [ -n "$LIMIT" ]; then
+            request_path="${request_path}&limit=${LIMIT}"
+          fi
+
+          if [ -n "$DELAY_MS" ]; then
+            request_path="${request_path}&delayMs=${DELAY_MS}"
+          fi
+
+          base_url="$INPUT_BASE_URL"
+          if [ -z "$base_url" ]; then
+            base_url="$REPOSITORY_BASE_URL"
+          fi
+
+          if [ -n "$base_url" ]; then
+            endpoint="${base_url%/}${request_path}"
+            echo "has_base_url=true" >> "$GITHUB_OUTPUT"
+          else
+            endpoint="$request_path"
+            echo "has_base_url=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "request_path=$request_path" >> "$GITHUB_OUTPUT"
+          echo "endpoint=$endpoint" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize operator request
+        env:
+          EXECUTE: ${{ inputs.execute }}
+          REQUEST_PATH: ${{ steps.build.outputs.request_path }}
+          ENDPOINT: ${{ steps.build.outputs.endpoint }}
+          HAS_BASE_URL: ${{ steps.build.outputs.has_base_url }}
+        run: |
+          echo "execute=$EXECUTE"
+          echo "request_path=$REQUEST_PATH"
+          echo "endpoint=$ENDPOINT"
+          if [ "$HAS_BASE_URL" != "true" ]; then
+            echo "No live scanner base URL is configured yet. Validation stops at request construction until SCANNER_BASE_URL or the base_url input is provided."
+          fi
+
+  run:
+    if: ${{ inputs.execute }}
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: production
+    env:
+      SCANNER_AUTH_TOKEN: ${{ secrets.SCANNER_AUTH_TOKEN }}
+      ENDPOINT: ${{ needs.prepare.outputs.endpoint }}
+      HAS_BASE_URL: ${{ needs.prepare.outputs.has_base_url }}
+
+    steps:
+      - name: Require configured scanner endpoint
+        run: |
+          if [ "$HAS_BASE_URL" != "true" ]; then
+            echo "SCANNER_BASE_URL is required to execute the full scrape workflow." >&2
+            exit 1
+          fi
+
+      - name: Trigger scanner scrape route
+        run: |
+          auth_header=()
+          if [ -n "$SCANNER_AUTH_TOKEN" ]; then
+            auth_header=(-H "Authorization: Bearer $SCANNER_AUTH_TOKEN")
+          fi
+
+          curl --fail-with-body --show-error --silent \
+            -X POST \
+            -H "Content-Type: application/json" \
+            "${auth_header[@]}" \
+            "$ENDPOINT"

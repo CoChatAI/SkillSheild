@@ -1,0 +1,24 @@
+# Phase 4 Artifact Summary
+
+- Replaced `packages/scanner/Dockerfile` with a real multi-stage production build.
+- The runtime image now installs the scanner's actual execution dependencies:
+  - `git`
+  - `python3`
+  - `python3-pip`
+  - `tar`
+  - `unzip`
+  - `zip`
+  - Cisco `skill-scanner` via `python3 -m pip install --break-system-packages cisco-ai-skill-scanner`
+  - `tsx` to run the real TypeScript service in the container
+- The final image exposes port `3100`, includes a `/health` `HEALTHCHECK`, and starts the real scanner service with `tsx packages/scanner/src/index.ts`.
+- Updated `packages/scanner/src/index.ts` so the server honors `PORT` and falls back to `3100`, which keeps local behavior intact and matches Fly's runtime shape.
+- Added checked-in Fly config at `packages/scanner/fly.toml` for the scanner service with:
+  - `app = "skillshield-scanner"`
+  - internal port `3100`
+  - `/health` checks
+  - scale-to-zero-friendly `auto_stop_machines`, `auto_start_machines`, and `min_machines_running = 0`
+  - no checked-in secrets or live Cloudflare IDs
+- Verification run:
+  - `docker build -f "packages/scanner/Dockerfile" -t skillshield-scanner-phase4 .`
+  - `docker run -d -p 33100:3100 skillshield-scanner-phase4` then `curl -fsS "http://127.0.0.1:33100/health"`
+  - `flyctl config validate -c "packages/scanner/fly.toml"` could not complete locally because `flyctl` is unauthenticated in this environment (`no access token available. Please login with 'flyctl auth login'`).

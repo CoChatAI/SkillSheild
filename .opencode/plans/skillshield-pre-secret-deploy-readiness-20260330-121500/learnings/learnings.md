@@ -1,0 +1,53 @@
+# Learnings: skillshield-pre-secret-deploy-readiness-20260330-121500
+
+## Phase 1 Learnings
+
+- The queue contract already in use is just the existing `SCAN_QUEUE.send()` payload from `packages/worker/src/routes/webhooks.ts`: `type`, `source`, `slug`, optional `repo`, optional `version`, optional `owner`, `triggered_by`, and `event_id`. Keeping the shared schema anchored to those fields avoided inventing a broader message envelope.
+- The previous scanner validation lived in `resolveSlug()` as a manual `slug || repo` check. Moving that rule into `packages/shared` worked cleanly once the shared locator fields were separated from the `refine()` call; Zod cannot call `.extend()` on a refined schema.
+- The scanner route initially regressed from `400` to `500` because `scanJobLocatorSchema.parse()` throws a `ZodError`, and the route only recognized the old plain error message. Using `safeParse()` in `executeScanJob()` and re-throwing the first issue message preserved the existing API behavior while still enforcing the shared contract.
+- Verification with `pnpm` was blocked by a local `corepack` signature mismatch before package scripts started. Running `./node_modules/.bin/vitest` and `./node_modules/.bin/tsc` directly was a reliable workaround for targeted phase verification.
+
+## Phase 2 Learnings
+
+- The cleanest Worker shape was to keep the existing Hono app for `fetch` and add a separate exported `consumeScanQueue()` function, then export a Worker entry object that includes both `fetch` and `queue`. Tests already imported the default export and used `app.request(...)`, so the default export also needed to preserve `request` for test compatibility.
+- Queue retries work best per-message here: invalid payloads should be acknowledged and dropped after `queuedScanJobSchema.safeParse()` fails, while scanner-forwarding failures should call `message.retry()` and return without any custom retry loop in the Worker. That keeps transient retries at the queue boundary and avoids poison-message retry storms.
+- Forwarding the parsed queue payload directly to the scanner works with the current shared contract because the scanner accepts the scan locator fields and ignores the extra queue metadata. The success test needed to compare parsed JSON bodies instead of raw `JSON.stringify()` output because Zod parsing can change object key order.
+- `wrangler deploy --dry-run` caught two important runtime/config issues quickly: `routes` must be top-level in this config, not nested under `[triggers]`, and `node:crypto` imports require `compatibility_flags = ["nodejs_compat"]` for the current Worker code to be safe at runtime.
+
+## Phase 3 Learnings
+
+- The least disruptive auth shape was to keep it at the route boundary in `packages/scanner/src/index.ts` instead of pushing auth concerns into service functions. That kept `/health` public, protected only the mutation routes, and let tests inject `authToken` directly without mutating `process.env`.
+- Treating a blank or unset scanner token as disabled auth (`trim()` then optional) preserved the pre-secret workflow cleanly. That matches the Worker-side behavior from Phase 2, where the `Authorization` header is only sent when `SCANNER_AUTH_TOKEN` exists.
+- Validating `/scan` with `scanJobLocatorSchema.safeParse()` before calling `executeScanJob()` gives the route an explicit shared contract while still keeping the service-level validation as a backstop. That avoids drift between Worker queue payload handling and direct scanner requests.
+- Auth failures should return `401`, not `400`. Keeping malformed bodies and invalid query params on the existing `400` path made the API behavior predictable while still distinguishing authorization failures clearly in tests.
+- Targeted verification was enough for this phase: `./node_modules/.bin/vitest run packages/scanner/test/service.test.ts` covered auth success/failure plus shared-schema validation at the route layer, and `./node_modules/.bin/tsc -p packages/scanner/tsconfig.json --noEmit` completed successfully even though the editor surfaced unrelated long-standing test typing diagnostics.
+
+## Phase 4 Learnings
+
+- The scanner service needed a small runtime change for Fly: reading `process.env.PORT` with a `3100` fallback in `packages/scanner/src/index.ts` kept local behavior intact while matching Fly's expected container contract.
+- Building the image against the real scanner code made the missing runtime toolchain concrete. The final image must include `git`, `python3`, `python3-pip`, `zip`, `unzip`, `tar`, and a real `skill-scanner` installation via `python3 -m pip install cisco-ai-skill-scanner`; otherwise the service would build but fail during real scan execution.
+- Node 22's `--experimental-strip-types` was not enough for this repo's extensionless local ESM imports. The container still crashed on `Cannot find module '/app/packages/scanner/src/service'`. Switching the runtime command to `tsx packages/scanner/src/index.ts` was the reliable fix for running the real TypeScript service without reshaping imports across the package.
+- `flyctl config validate` was not runnable to completion in this local environment because `flyctl` requires an authenticated session even for validation. Keeping `packages/scanner/fly.toml` secret-free still leaves Phase 4 in a good state; Phase 5 can validate it in CI once `FLY_API_TOKEN` is available.
+- The strongest phase verification was end-to-end container startup, not just `docker build`. `docker build -f packages/scanner/Dockerfile -t skillshield-scanner-phase4 .` succeeded, and `docker run -d -p 33100:3100 skillshield-scanner-phase4` followed by `curl http://127.0.0.1:33100/health` confirmed the image starts the real scanner service and answers health checks.
+
+## Phase 5 Learnings
+
+- The safest pre-secret workflow shape was to split every workflow into an always-usable validation/prep path and a separately gated execution path. For `deploy-worker.yml` and `deploy-scanner.yml`, validation runs without deploy credentials while the actual deploy jobs only run when the `deploy` input is `true` and the required secrets are present.
+- The full scrape operator flow needed to stay anchored to the existing scanner route contract instead of inventing a new job payload. Building the request directly as `POST /scrape/:source` with `wait`, optional `limit`, optional `delayMs`, and `useLlm` kept the workflow aligned with `packages/scanner/src/index.ts` and with the checked-in smoke helper scripts.
+- `flyctl config validate` is still a secret-backed step in practice because it needs `FLY_API_TOKEN`, so the scanner workflow now always validates the checked-in `fly.toml` shape and Docker build pre-secret, then runs `flyctl config validate` only when the token exists. That keeps CI useful before secrets without pretending Fly validation works unauthenticated.
+- Local workflow validation worked best with `actionlint` in Docker, passing the workflow file paths explicitly. Running `actionlint` with no file arguments failed because this workspace is not a git repo checkout, but `docker run ... rhysd/actionlint:latest .github/workflows/*.yml` linted the workflows successfully.
+- The earlier local `pnpm` validation caveat still applies on this machine: Corepack is blocked by the signature mismatch from Phase 1, so direct local verification was more reliable with `./node_modules/.bin/tsc` plus containerized `actionlint` than with `pnpm` commands.
+## Phase 6 Learnings
+
+- The safest Terraform shape was to keep account- and zone-specific identity as required variables, while defaulting only the repo-anchored resource names (`skillshield-db`, `skillshield-skills`, `skillshield-reports`, `skillshield-meta`, `scan-jobs`, `skillshield-worker`). That kept the config validation-friendly without baking in live account values.
+- Cloudflare provider coverage is good enough to replace all of the stubs directly: `cloudflare_d1_database`, `cloudflare_r2_bucket`, `cloudflare_queue`, `cloudflare_dns_record`, and `cloudflare_workers_route` all validated successfully once the provider was initialized. Terraform should own the queue resource itself here, while the Worker queue-consumer attachment still stays in `wrangler.toml` to match the runtime deploy path.
+- `terraform validate` succeeded locally after `terraform init -backend=false`, but that initialization also generated `infrastructure/terraform/.terraform.lock.hcl`. That lockfile is worth keeping because it pins the validated Cloudflare provider version used by this repo's checked-in config.
+- The earlier Wrangler queue-consumer work was only half production-ready until the config was split into a local-safe default and an explicit `[env.production]` section. Validating with `wrangler deploy --dry-run --env production` was the important check, because it confirmed the production env resolves both `queues.producers` and `queues.consumers` along with the D1/R2 bindings.
+- A config-only timeout var would have drifted immediately from runtime behavior. Adding `SCANNER_REQUEST_TIMEOUT_MS` to `WorkerBindings` and using it in the queue consumer via `AbortSignal.timeout(...)` kept the new Wrangler env shape honest and let the queue-forwarding path fail fast on scanner hangs instead of waiting indefinitely.
+
+## Phase 7 Learnings
+
+- The repo-level `turbo run test|build|typecheck` path is still not trustworthy on this machine because Turbo shells into `pnpm run ...`, which immediately trips the local Corepack key verification failure before any package script starts. The honest fallback is to run the same package-level `tsc` and `vitest` commands directly from `./node_modules/.bin` and document that the limitation is environmental rather than repo code.
+- Quoted glob arguments do not expand for `vitest` under Bash, so a command like `vitest run "packages/scanner/test/*.test.ts"` silently under-runs the suite. For full coverage here, the scanner and worker test globs need to be passed unquoted so the shell expands them first.
+- `flyctl config validate` remains externally gated even at the final readiness stage. Without a Fly login or `FLY_API_TOKEN`, the command exits immediately with an auth error, so the best pre-secret assurance available locally is the checked-in `fly.toml` plus the workflow path that performs real Fly validation once credentials exist.
+- Final readiness documentation needs to separate validation caveats from remaining go-live work. The allowed remaining checklist stays limited to secrets/account IDs, deploy/apply, scrapes, and webhook registration, while local environment blockers belong in the validation notes instead of the remaining-work section.
