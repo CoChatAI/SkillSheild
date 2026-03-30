@@ -123,10 +123,32 @@ curl http://127.0.0.1:8787/api/v1/stats
 curl http://127.0.0.1:8787/
 ```
 
-### Point the `skills` CLI at SkillShield
+### CLI quick setup
+
+Point either CLI at your SkillShield endpoint with an environment variable.
+
+#### ClawHub CLI
+
+```bash
+CLAWHUB_REGISTRY=http://127.0.0.1:8787/clawhub clawhub install trello
+```
+
+Production example:
+
+```bash
+CLAWHUB_REGISTRY=https://skillshield.cochat.ai/clawhub clawhub install trello
+```
+
+#### skills.sh CLI
 
 ```bash
 SKILLS_API_URL=http://127.0.0.1:8787 npx skills find design
+```
+
+Production example:
+
+```bash
+SKILLS_API_URL=https://skillshield.cochat.ai npx skills find design
 ```
 
 ### Scanner service
