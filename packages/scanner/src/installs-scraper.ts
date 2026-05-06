@@ -25,6 +25,15 @@ export interface ScrapeInstallsResult {
 export interface PersistInstallsOptions {
   scrapedAt?: string;
   fetchImpl?: typeof fetch;
+  /**
+   * Maximum number of D1 update requests in flight at once.  D1 doesn't
+   * expose true bulk update (the HTTP query endpoint runs one statement per
+   * call), so without parallelism a 700-row refresh takes ~700 sequential
+   * round-trips and risks timing out the GitHub Action.  Default 8 keeps us
+   * well under D1's per-account rate limits while cutting wall-clock time
+   * by an order of magnitude.
+   */
+  concurrency?: number;
 }
 
 export interface PersistInstallsResult {
@@ -165,10 +174,27 @@ export async function persistInstallCounts(
 ): Promise<PersistInstallsResult> {
   const fetchImpl = options.fetchImpl ?? fetch;
   const scrapedAt = options.scrapedAt ?? new Date().toISOString();
+  const concurrency = Math.max(1, Math.floor(options.concurrency ?? 8));
   const url = `https://api.cloudflare.com/client/v4/accounts/${config.accountId}/d1/database/${config.databaseId}/query`;
   let updated = 0;
+  let cursor = 0;
 
-  for (const record of records) {
+  async function worker(): Promise<void> {
+    while (true) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= records.length) {
+        return;
+      }
+      const record = records[index]!;
+      const changed = await updateOne(record);
+      if (changed) {
+        updated += 1;
+      }
+    }
+  }
+
+  async function updateOne(record: ScrapedInstallRecord): Promise<boolean> {
     const skillId = `${record.source}:${record.slug}`;
 
     const response = await fetchImpl(url, {
@@ -196,10 +222,12 @@ export async function persistInstallCounts(
       | { result?: Array<{ meta?: { changes?: number } }> }
       | null;
     const changes = result?.result?.[0]?.meta?.changes ?? 0;
-    if (changes > 0) {
-      updated += 1;
-    }
+    return changes > 0;
   }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, records.length) }, () => worker()),
+  );
 
   return {
     attempted: records.length,

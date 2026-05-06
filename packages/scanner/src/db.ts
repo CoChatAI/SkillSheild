@@ -75,9 +75,11 @@ export function buildD1Statements(payload: PublishDatabasePayload): D1Statement[
         '  verdict = excluded.verdict,',
         '  scan_severity = excluded.scan_severity,',
         '  findings_count = excluded.findings_count,',
-        // installs is updated by the dedicated installs scraper, so only
-        // overwrite from a scan when the row had nothing recorded yet.
-        '  installs = CASE WHEN excluded.installs > 0 THEN excluded.installs ELSE skills.installs END,',
+        // installs is owned by the dedicated installs scraper.  Only fall
+        // back to the scanner-supplied value when the row has nothing
+        // recorded yet (NULL or 0), otherwise preserve whatever the scraper
+        // last wrote — even if the scan happens to ship a non-zero count.
+        '  installs = CASE WHEN skills.installs IS NULL OR skills.installs = 0 THEN excluded.installs ELSE skills.installs END,',
         '  installs_updated_at = COALESCE(excluded.installs_updated_at, skills.installs_updated_at),',
         '  category = COALESCE(excluded.category, skills.category),',
         '  last_scanned_at = excluded.last_scanned_at,',

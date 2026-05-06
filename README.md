@@ -247,7 +247,15 @@ For the exact production sequence, use:
 ### Database migrations
 
 - `packages/worker/schema.sql` — base schema for fresh D1 databases
-- `packages/worker/migrations/0001_add_category_and_installs_metadata.sql` — adds `category`, `installs_updated_at`, and the matching indexes to existing deployments. Apply with `wrangler d1 execute --file=packages/worker/migrations/0001_add_category_and_installs_metadata.sql`.
+- `packages/worker/migrations/0001_add_category_and_installs_metadata.sql` — adds `category`, `installs_updated_at`, and the matching indexes to existing deployments. Apply with the same pattern the runbook uses for the base schema:
+
+```bash
+npx pnpm@10.6.3 exec wrangler d1 execute skillshield-db \
+  --env production \
+  --file packages/worker/migrations/0001_add_category_and_installs_metadata.sql
+```
+
+Drop `--env production` to apply against the local dev database.
 
 ## Validation
 

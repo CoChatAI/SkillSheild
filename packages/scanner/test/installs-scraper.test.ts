@@ -89,10 +89,55 @@ describe('persistInstallCounts', () => {
 
     expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(result).toEqual({ attempted: 2, updated: 2, scrapedAt: '2026-05-05T00:00:00.000Z' });
-    const firstCall = fetchImpl.mock.calls[0]?.[1] as { body?: string };
-    const body = JSON.parse(firstCall?.body ?? '{}');
-    expect(body.sql).toContain('UPDATE skills SET installs = ?');
-    expect(body.params).toEqual([10, '2026-05-05T00:00:00.000Z', 'skills-sh:a/b/c']);
+    // With bounded concurrency the per-record fetches can interleave, so
+    // assert on the set of bodies rather than positional order.
+    const bodies = fetchImpl.mock.calls.map((call) => {
+      const init = call[1] as { body?: string };
+      return JSON.parse(init?.body ?? '{}');
+    });
+    for (const body of bodies) {
+      expect(body.sql).toContain('UPDATE skills SET installs = ?');
+    }
+    expect(bodies.map((b) => b.params).sort()).toEqual(
+      [
+        [10, '2026-05-05T00:00:00.000Z', 'skills-sh:a/b/c'],
+        [20, '2026-05-05T00:00:00.000Z', 'skills-sh:d/e/f'],
+      ].sort(),
+    );
+  });
+
+  it('runs updates in parallel up to the configured concurrency limit', async () => {
+    let inFlight = 0;
+    let peakInFlight = 0;
+    const fetchImpl = vi.fn(async () => {
+      inFlight += 1;
+      peakInFlight = Math.max(peakInFlight, inFlight);
+      // Yield to the event loop so other workers can spin up before this one
+      // resolves — without the await, fetchImpl is effectively synchronous
+      // and we couldn't observe the parallel window.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      inFlight -= 1;
+      return new Response(
+        JSON.stringify({ result: [{ meta: { changes: 1 } }] }),
+        { status: 200 },
+      );
+    });
+
+    const records = Array.from({ length: 12 }, (_, i) => ({
+      source: 'skills-sh' as const,
+      slug: `owner/repo/skill-${i}`,
+      installs: i,
+    }));
+
+    await persistInstallCounts(
+      { accountId: 'acc', apiToken: 'token', databaseId: 'db' },
+      records,
+      { fetchImpl: fetchImpl as typeof fetch, concurrency: 4 },
+    );
+
+    expect(fetchImpl).toHaveBeenCalledTimes(12);
+    expect(peakInFlight).toBeGreaterThan(1);
+    expect(peakInFlight).toBeLessThanOrEqual(4);
   });
 
   it('throws when D1 returns a non-2xx response', async () => {
