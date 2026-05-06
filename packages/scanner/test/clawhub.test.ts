@@ -14,16 +14,16 @@ describe('ClawHubAdapter', () => {
       .fn()
       .mockResolvedValueOnce(
         jsonResponse({
-          skills: [
-            { slug: 'trello', name: 'Trello', versions: { latest: '1.2.0' } },
-            { slug: 'github', name: 'GitHub', versions: { latest: '4.0.1' } },
+          items: [
+            { name: 'trello', displayName: 'Trello', latestVersion: '1.2.0' },
+            { name: 'github', displayName: 'GitHub', latestVersion: '4.0.1' },
           ],
           nextCursor: 'page-2',
         }),
       )
       .mockResolvedValueOnce(
         jsonResponse({
-          skills: [{ slug: 'linear', name: 'Linear', versions: { latest: '0.9.0' } }],
+          items: [{ name: 'linear', displayName: 'Linear', latestVersion: '0.9.0' }],
         }),
       );
 
@@ -43,16 +43,16 @@ describe('ClawHubAdapter', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(fetchMock).toHaveBeenNthCalledWith(
       1,
-      'https://clawhub.example/api/v1/skills?limit=100',
-      undefined,
+      'https://clawhub.example/api/v1/packages?family=skill&limit=200',
+      { headers: {} },
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
-      'https://clawhub.example/api/v1/skills?limit=100&cursor=page-2',
-      undefined,
+      'https://clawhub.example/api/v1/packages?family=skill&limit=200&cursor=page-2',
+      { headers: {} },
     );
     expect(sleep).toHaveBeenCalledTimes(1);
-    expect(sleep).toHaveBeenCalledWith(200);
+    expect(sleep).toHaveBeenCalledWith(500);
   });
 
   it('downloads an archive and extracts it into a temp directory', async () => {
@@ -73,6 +73,7 @@ describe('ClawHubAdapter', () => {
 
     expect(fetchMock).toHaveBeenCalledWith(
       'https://clawhub.example/api/v1/download?slug=team%2Ftrello&version=1.2.3',
+      { headers: {} },
     );
     expect(zipPath).toContain('team-trello.zip');
     await expect(access(zipPath)).resolves.toBeUndefined();
@@ -80,13 +81,16 @@ describe('ClawHubAdapter', () => {
     await expect(readFile(join(skillDir, 'SKILL.md'), 'utf8')).resolves.toContain('Trello');
   });
 
-  it('throws a clear error when ClawHub returns malformed list data', async () => {
+  it('skips malformed list entries', async () => {
     const adapter = new ClawHubAdapter({
       registry: 'https://clawhub.example',
-      fetch: vi.fn().mockResolvedValue(jsonResponse({ skills: [{ name: 'Broken entry' }] })) as typeof fetch,
+      fetch: vi
+        .fn()
+        .mockResolvedValueOnce(jsonResponse({ items: [{ displayName: 'Broken entry' }] }))
+        .mockResolvedValueOnce(jsonResponse({ skills: [{ displayName: 'Broken entry' }] })) as typeof fetch,
     });
 
-    await expect(adapter.listAll()).rejects.toThrow(/missing slug/);
+    await expect(adapter.listAll()).resolves.toEqual([]);
   });
 });
 

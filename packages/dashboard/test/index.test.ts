@@ -34,10 +34,10 @@ describe('dashboard renderer', () => {
     });
 
     expect(html).toContain('<!DOCTYPE html>');
-    expect(html).toContain('Only serve the skills you can trust.');
-    expect(html).toContain('Indexed skills');
-    expect(html).toContain('Registry coverage');
-    expect(html).toContain('Public report');
+    expect(html).toContain('The <span class="gradient-text">security-scanned</span> CDN for AI skills');
+    expect(html).toContain('Indexed');
+    expect(html).toContain('Registry Coverage');
+    expect(html).toContain('Report');
     expect(html).toContain('/api/v1/verify/clawhub/trello');
   });
 });
