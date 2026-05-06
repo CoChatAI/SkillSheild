@@ -84,6 +84,45 @@ describe('SkillsShAdapter', () => {
     await expect(locateSkillDirectory(repositoryDir, 'frontend-design')).resolves.toMatch(/packages\/frontend-design$/);
   });
 
+  it('refuses to fall back to a different skill when the slug name has no exact match', async () => {
+    // skills.sh sometimes lists slugs that don't actually exist in the
+    // upstream repo (e.g. `vercel-react-best-practices` when the dir is
+    // `react-best-practices`).  We must NOT silently substitute another
+    // skill's content — the row would mislead users.
+    const repositoryDir = await makeTempDir('skills-sh-mismatch-test');
+    await mkdir(join(repositoryDir, 'skills', 'react-best-practices'), { recursive: true });
+    await writeFile(
+      join(repositoryDir, 'skills', 'react-best-practices', 'SKILL.md'),
+      '# React best practices\n',
+    );
+
+    await expect(
+      locateSkillDirectory(repositoryDir, 'vercel-react-best-practices'),
+    ).rejects.toThrow(/Could not locate SKILL\.md/);
+  });
+
+  it('ignores dot-prefixed agent config dirs (.claude, .cursor, …) during tree walk', async () => {
+    const repositoryDir = await makeTempDir('skills-sh-dotdir-test');
+    await mkdir(join(repositoryDir, '.claude', 'skills', 'impeccable'), { recursive: true });
+    await mkdir(join(repositoryDir, '.cursor', 'skills', 'impeccable'), { recursive: true });
+    await writeFile(
+      join(repositoryDir, '.claude', 'skills', 'impeccable', 'SKILL.md'),
+      '# Impeccable (claude)\n',
+    );
+    await writeFile(
+      join(repositoryDir, '.cursor', 'skills', 'impeccable', 'SKILL.md'),
+      '# Impeccable (cursor)\n',
+    );
+
+    // The repo contains SKILL.md files but only inside dot-prefixed
+    // agent config dirs; the scanner should treat the slug as missing
+    // rather than indexing the duplicated `impeccable` content under a
+    // different slug name like `arrange`.
+    await expect(
+      locateSkillDirectory(repositoryDir, 'arrange'),
+    ).rejects.toThrow(/Could not locate SKILL\.md/);
+  });
+
   it('exposes small parsing helpers for slug validation and page parsing', () => {
     expect(parseSkillsShSlug('anthropics/skills/frontend-design')).toEqual({
       owner: 'anthropics',

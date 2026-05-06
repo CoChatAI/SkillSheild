@@ -131,15 +131,25 @@ export async function locateSkillDirectory(repositoryDir: string, skillName: str
     }
   }
 
+  // Tree-walk fallback for repos with non-standard layouts.  Two strict
+  // gates so we don't index phantom skills (skills.sh's listings sometimes
+  // name a slug whose path doesn't exist at all in the repo, e.g.
+  // `vercel-labs/agent-skills/vercel-react-best-practices` when the actual
+  // directory is `react-best-practices`):
+  //
+  //  1. The candidate directory's name must match the skillName exactly
+  //     (case-insensitive).  Substring matches are too loose — they let
+  //     `react-best-practices` satisfy a search for `vercel-react-best-practices`.
+  //  2. We never fall through to "any SKILL.md in the repo" — without an
+  //     exact name match the skill is treated as missing and the scrape
+  //     skips it rather than persisting a verdict for the wrong content.
   const matchedDirectories = await collectDirectoriesWithSkillMarkdown(repositoryDir, 0);
-  const skillNameMatches = matchedDirectories.filter((directory) => directoryIncludesSkillName(directory, skillName));
+  const skillNameMatches = matchedDirectories.filter((directory) =>
+    directoryNameEquals(directory, skillName),
+  );
 
   if (skillNameMatches.length > 0) {
     return preferShallowestPath(skillNameMatches);
-  }
-
-  if (matchedDirectories.length > 0) {
-    return preferShallowestPath(matchedDirectories);
   }
 
   throw new Error(`Could not locate SKILL.md for skills.sh skill "${skillName}" in ${repositoryDir}.`);
@@ -213,6 +223,14 @@ async function collectDirectoriesWithSkillMarkdown(directoryPath: string, depth:
       continue;
     }
 
+    // Skip dot-prefixed agent config directories (`.claude`, `.cursor`,
+    // `.gemini`, `.github`, `.opencode`, …).  These mirror the same skill
+    // content for every supported agent and pollute name-matching with
+    // duplicates that don't represent a canonical source-of-truth path.
+    if (entry.name.startsWith('.')) {
+      continue;
+    }
+
     const childDirectory = join(directoryPath, entry.name);
     matchedDirectories.push(...await collectDirectoriesWithSkillMarkdown(childDirectory, depth + 1));
   }
@@ -220,10 +238,9 @@ async function collectDirectoriesWithSkillMarkdown(directoryPath: string, depth:
   return matchedDirectories;
 }
 
-function directoryIncludesSkillName(directoryPath: string, skillName: string) {
-  const lowerCaseDirectory = directoryPath.toLowerCase();
-  const lowerCaseSkillName = skillName.toLowerCase();
-  return lowerCaseDirectory.includes(`/${lowerCaseSkillName}`) || lowerCaseDirectory.endsWith(lowerCaseSkillName);
+function directoryNameEquals(directoryPath: string, skillName: string) {
+  const lastSegment = directoryPath.split('/').filter(Boolean).pop() ?? '';
+  return lastSegment.toLowerCase() === skillName.toLowerCase();
 }
 
 function preferShallowestPath(paths: string[]) {
