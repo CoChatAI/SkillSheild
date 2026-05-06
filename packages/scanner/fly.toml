@@ -3,6 +3,12 @@ primary_region = "ord"
 kill_signal = "SIGINT"
 kill_timeout = "5s"
 
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "1024mb"
+
+# Queue-backed rollout starts with two 1024mb machines and no scanner-internal
+# parallelism; scale horizontally by adding machines before increasing local concurrency.
 # Dockerfile + build context are passed explicitly on the CLI in
 # .github/workflows/deploy-scanner.yml because the Dockerfile copies from
 # repo-root paths.  We keep an empty [build] section so the validate step's
@@ -12,13 +18,17 @@ kill_timeout = "5s"
 [env]
   NODE_ENV = "production"
   PORT = "3100"
+  SCRAPE_QUEUE_BASE_URL = "https://skillshield.cochat.ai"
+  SCRAPE_RECENT_SCAN_MAX_AGE_HOURS = "168"
+  SCANNER_MAX_CONCURRENT_SCANS = "1"
+  DISABLED_SOURCES = "clawhub"
 
 [http_service]
   internal_port = 3100
   force_https = true
   auto_stop_machines = "stop"
   auto_start_machines = true
-  min_machines_running = 0
+  min_machines_running = 4
   processes = ["app"]
 
   [[http_service.checks]]

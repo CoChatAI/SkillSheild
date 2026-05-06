@@ -1,13 +1,16 @@
 import { serve } from '@hono/node-server';
+import { randomUUID } from 'node:crypto';
 import { Hono } from 'hono';
-import { scanJobLocatorSchema } from '@skillshield/shared';
+import { scanJobLocatorSchema, type SkillSource } from '@skillshield/shared';
 import {
   createDefaultAdapters,
+  enqueueFullSourceScrape,
   executeScanJob,
   parseSource,
   runFullSourceScrape,
   type ServiceDependencies,
 } from './service';
+import { createHttpScrapeQueueFromEnv } from './scrape-queue';
 import {
   persistInstallCounts,
   scrapeSkillsShInstalls,
@@ -17,6 +20,8 @@ import {
 interface ScannerAppDependencies extends ServiceDependencies {
   backgroundRunner?: (task: Promise<unknown>) => void;
   authToken?: string;
+  maxConcurrentScans?: number;
+  disabledSources?: SkillSource[];
 }
 
 export function createScannerApp(dependencies: ScannerAppDependencies = {}) {
@@ -24,9 +29,13 @@ export function createScannerApp(dependencies: ScannerAppDependencies = {}) {
   const serviceDependencies: ServiceDependencies = {
     ...dependencies,
     adapters: dependencies.adapters ?? createDefaultAdapters(),
+    scrapeQueue: dependencies.scrapeQueue ?? createHttpScrapeQueueFromEnv(),
   };
   const backgroundRunner = dependencies.backgroundRunner ?? defaultBackgroundRunner;
   const authToken = normalizeOptionalString(dependencies.authToken ?? process.env.SCANNER_AUTH_TOKEN);
+  const maxConcurrentScans = resolveMaxConcurrentScans(dependencies.maxConcurrentScans);
+  const disabledSources = new Set(dependencies.disabledSources ?? parseDisabledSources(process.env.DISABLED_SOURCES));
+  let activeScanRequests = 0;
 
   app.get('/health', (c) => c.json({ status: 'ok', service: 'skillshield-scanner' }));
 
@@ -40,12 +49,25 @@ export function createScannerApp(dependencies: ScannerAppDependencies = {}) {
         throw new Error(parsedBody.error.issues[0]?.message ?? 'Invalid scan job payload.');
       }
 
-      const result = await executeScanJob(parsedBody.data, serviceDependencies);
+      if (disabledSources.has(parsedBody.data.source)) {
+        return c.json({ success: false, error: `Source is disabled: ${parsedBody.data.source}` }, 403);
+      }
 
-      return c.json({
-        success: true,
-        ...result,
-      });
+      if (activeScanRequests >= maxConcurrentScans) {
+        return c.json({ success: false, error: 'Scanner is busy. Retry later.' }, 503, { 'Retry-After': '30' });
+      }
+
+      activeScanRequests += 1;
+      try {
+        const result = await executeScanJob(parsedBody.data, serviceDependencies);
+
+        return c.json({
+          success: true,
+          ...result,
+        });
+      } finally {
+        activeScanRequests -= 1;
+      }
     } catch (error) {
       return handleRouteError(c, error);
     }
@@ -77,29 +99,50 @@ export function createScannerApp(dependencies: ScannerAppDependencies = {}) {
     try {
       authorizeMutationRequest(c.req.header('authorization'), authToken);
       const source = parseSource(c.req.param('source'));
+      if (disabledSources.has(source)) {
+        return c.json({ success: false, error: `Source is disabled: ${source}` }, 403);
+      }
+
       const waitForCompletion = c.req.query('wait') === 'true';
       const limit = parseOptionalInteger(c.req.query('limit'));
       const delayMs = parseOptionalInteger(c.req.query('delayMs'));
       const useLlm = parseOptionalBoolean(c.req.query('useLlm'));
-      const scrapeTask = runFullSourceScrape(source, {
-        limit,
-        interSkillDelayMs: delayMs,
-        scanOptions: typeof useLlm === 'boolean' ? { useLlm } : undefined,
-      }, serviceDependencies);
+      const force = parseOptionalBoolean(c.req.query('force'));
+      const recentScanMaxAgeHours = parseOptionalInteger(
+        c.req.query('recentScanMaxAgeHours') ?? process.env.SCRAPE_RECENT_SCAN_MAX_AGE_HOURS,
+      );
 
       if (waitForCompletion) {
+        const scrapeTask = runFullSourceScrape(source, {
+          limit,
+          interSkillDelayMs: delayMs,
+          scanOptions: typeof useLlm === 'boolean' ? { useLlm } : undefined,
+        }, serviceDependencies);
         const result = await scrapeTask;
         return c.json({ started: true, ...result });
       }
 
-      backgroundRunner(scrapeTask);
+      if (typeof limit !== 'number') {
+        const runId = randomUUID();
+        const scrapeTask = enqueueFullSourceScrape(source, {
+          runId,
+          scanOptions: typeof useLlm === 'boolean' ? { useLlm } : undefined,
+          force: force ?? false,
+          recentScanMaxAgeHours,
+        }, serviceDependencies);
 
-      return c.json({
-        started: true,
-        completed: false,
-        source,
-        limit: limit ?? null,
-      });
+        backgroundRunner(scrapeTask);
+        return c.json({ started: true, runId, source, background: true }, 202);
+      }
+
+      const result = await enqueueFullSourceScrape(source, {
+        limit,
+        scanOptions: typeof useLlm === 'boolean' ? { useLlm } : undefined,
+        force: force ?? false,
+        recentScanMaxAgeHours,
+      }, serviceDependencies);
+
+      return c.json(result, 202);
     } catch (error) {
       return handleRouteError(c, error);
     }
@@ -148,6 +191,18 @@ function requireEnv(name: string) {
   return value;
 }
 
+function resolveMaxConcurrentScans(configuredValue: number | undefined) {
+  const parsedValue = typeof configuredValue === 'number'
+    ? configuredValue
+    : parseOptionalInteger(process.env.SCANNER_MAX_CONCURRENT_SCANS);
+
+  if (typeof parsedValue !== 'number' || !Number.isInteger(parsedValue) || parsedValue <= 0) {
+    return 1;
+  }
+
+  return parsedValue;
+}
+
 function parseOptionalInteger(value: string | undefined) {
   if (!value) {
     return undefined;
@@ -176,6 +231,17 @@ function parseOptionalBoolean(value: string | undefined) {
   }
 
   throw new Error(`Invalid boolean value: ${value}`);
+}
+
+function parseDisabledSources(value: string | undefined): SkillSource[] {
+  if (!value?.trim()) {
+    return [];
+  }
+
+  return value
+    .split(',')
+    .map((source) => source.trim())
+    .filter((source): source is SkillSource => source === 'clawhub' || source === 'skills-sh');
 }
 
 function authorizeMutationRequest(authorizationHeader: string | undefined, authToken: string | undefined) {

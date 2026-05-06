@@ -146,8 +146,8 @@ describe('public worker routes', () => {
     expect(response.headers.get('content-type')).toBe('text/html; charset=UTF-8');
 
     const html = await response.text();
-    expect(html).toContain('SkillShield Dashboard');
-    expect(html).toContain('Only serve the skills you can trust.');
+    expect(html).toContain('SkillShield — Security-Scanned Skill CDN');
+    expect(html).toContain('Point your CLI at SkillShield instead of the upstream registry.');
     expect(html).toContain('Recent scans');
     expect(html).toContain('owner/repo/skill-name');
   });

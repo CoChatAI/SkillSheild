@@ -21,6 +21,8 @@ export type SkillRow = {
   r2_key: string | null;
   report_r2_key: string | null;
   metadata: string | null;
+  compliance_verdict: string | null;
+  compliance_severity: string | null;
 };
 
 export type ScanRunRow = {
@@ -57,12 +59,105 @@ export type UnifiedSearchQuery = SkillListQuery & {
   sort?: SkillSearchSort;
 };
 
+export type ScrapeTrackingStatus = 'queued' | 'running' | 'completed' | 'retrying' | 'failed';
+
+export type ScrapeRunRow = {
+  id: string;
+  source: string;
+  status: ScrapeTrackingStatus;
+  total_jobs: number;
+  queued_jobs: number;
+  running_jobs: number;
+  completed_jobs: number;
+  failed_jobs: number;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  error: string | null;
+};
+
+export type ScrapeJobRow = {
+  id: string;
+  run_id: string;
+  source: string;
+  slug: string;
+  version: string;
+  status: ScrapeTrackingStatus;
+  attempts: number;
+  queued_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  updated_at: string;
+  error: string | null;
+};
+
+export type CreateScrapeRunInput = {
+  id: string;
+  source: string;
+  createdAt?: string;
+  force?: boolean;
+};
+
+export type UpdateScrapeRunStatusInput = {
+  id: string;
+  status: ScrapeTrackingStatus;
+  updatedAt?: string;
+  completedAt?: string | null;
+  error?: string | null;
+};
+
+export type UpsertScrapeJobInput = {
+  id: string;
+  runId: string;
+  source: string;
+  slug: string;
+  version: string;
+  queuedAt?: string;
+  force?: boolean;
+  recentScanMaxAgeHours?: number;
+};
+
+export type UpdateScrapeJobStatusInput = {
+  runId: string;
+  source: string;
+  slug: string;
+  version: string;
+  status: ScrapeTrackingStatus;
+  updatedAt?: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  error?: string | null;
+  incrementAttempts?: boolean;
+};
+
 export function getDatabaseHealthLabel(): string {
   return 'configured';
 }
 
 export function isServableVerdict(verdict: string | null | undefined) {
   return verdict !== null && verdict !== undefined && SERVABLE_VERDICTS.has(verdict);
+}
+
+/**
+ * For enterprise routes: use compliance_verdict instead of verdict.
+ * Falls back to verdict if compliance_verdict is not yet populated.
+ */
+export function getEffectiveVerdict(row: SkillRow, mode: 'security' | 'compliance' = 'security') {
+  if (mode === 'compliance') {
+    return row.compliance_verdict ?? row.verdict;
+  }
+  return row.verdict;
+}
+
+export function getEffectiveSeverity(row: SkillRow, mode: 'security' | 'compliance' = 'security') {
+  if (mode === 'compliance') {
+    return row.compliance_severity ?? row.scan_severity;
+  }
+  return row.scan_severity;
+}
+
+export function isServableInMode(row: SkillRow, mode: 'security' | 'compliance' = 'security') {
+  return isServableVerdict(getEffectiveVerdict(row, mode));
 }
 
 export function parseSkillMetadata(metadata: string | null | undefined): Record<string, unknown> {
@@ -81,6 +176,220 @@ export function parseSkillMetadata(metadata: string | null | undefined): Record<
   } catch {
     return {};
   }
+}
+
+export async function createScrapeRun(db: D1Database, input: CreateScrapeRunInput) {
+  const createdAt = input.createdAt ?? new Date().toISOString();
+
+  await db
+    .prepare(
+      [
+        'INSERT INTO scrape_runs (id, source, status, created_at, updated_at)',
+        "VALUES (?, ?, 'queued', ?, ?)",
+        'ON CONFLICT(id) DO UPDATE SET',
+        '  updated_at = excluded.updated_at',
+      ].join(' '),
+    )
+    .bind(input.id, input.source, createdAt, createdAt)
+    .run();
+}
+
+export async function getActiveScrapeRun(db: D1Database, source: string) {
+  return db
+    .prepare(
+      [
+        'SELECT id, source, status, total_jobs, queued_jobs, running_jobs, completed_jobs, failed_jobs,',
+        '       created_at, updated_at, completed_at, error',
+        'FROM scrape_runs',
+        "WHERE source = ? AND status IN ('queued', 'running')",
+        'ORDER BY created_at DESC',
+        'LIMIT 1',
+      ].join(' '),
+    )
+    .bind(source)
+    .first<ScrapeRunRow>();
+}
+
+export async function updateScrapeRunStatus(db: D1Database, input: UpdateScrapeRunStatusInput) {
+  const updatedAt = input.updatedAt ?? new Date().toISOString();
+
+  await db
+    .prepare(
+      [
+        'UPDATE scrape_runs SET',
+        '  status = ?,',
+        '  updated_at = ?,',
+        '  completed_at = ?,',
+        '  error = ?',
+        'WHERE id = ?',
+      ].join(' '),
+    )
+    .bind(input.status, updatedAt, input.completedAt ?? null, input.error ?? null, input.id)
+    .run();
+}
+
+export async function upsertScrapeJob(db: D1Database, input: UpsertScrapeJobInput) {
+  const queuedAt = input.queuedAt ?? new Date().toISOString();
+
+  await db
+    .prepare(
+      [
+        'INSERT INTO scrape_jobs (id, run_id, source, slug, version, status, attempts, queued_at, updated_at)',
+        "VALUES (?, ?, ?, ?, ?, 'queued', 0, ?, ?)",
+        'ON CONFLICT(run_id, source, slug, version) DO UPDATE SET',
+        '  updated_at = excluded.updated_at',
+      ].join(' '),
+    )
+    .bind(input.id, input.runId, input.source, input.slug, input.version, queuedAt, queuedAt)
+    .run();
+}
+
+export async function hasRecentCompletedScan(db: D1Database, input: {
+  source: string;
+  slug: string;
+  version: string;
+  since: string;
+}) {
+  const existingRun = await db
+    .prepare(
+      [
+        'SELECT scan_runs.id',
+        'FROM scan_runs',
+        'INNER JOIN skills ON skills.id = scan_runs.skill_id',
+        'WHERE skills.source = ? AND skills.slug = ?',
+        "  AND scan_runs.status = 'completed'",
+        '  AND scan_runs.version = ?',
+        '  AND scan_runs.completed_at IS NOT NULL',
+        '  AND scan_runs.completed_at >= ?',
+        'LIMIT 1',
+      ].join(' '),
+    )
+    .bind(input.source, input.slug, input.version, input.since)
+    .first<{ id: string }>();
+
+  return Boolean(existingRun);
+}
+
+export async function updateScrapeJobStatus(db: D1Database, input: UpdateScrapeJobStatusInput) {
+  const updatedAt = input.updatedAt ?? new Date().toISOString();
+  const attemptsSql = input.incrementAttempts ? 'attempts = attempts + 1,' : '';
+
+  await db
+    .prepare(
+      [
+        'UPDATE scrape_jobs SET',
+        '  status = ?,',
+        attemptsSql,
+        '  started_at = COALESCE(?, started_at),',
+        '  completed_at = ?,',
+        '  updated_at = ?,',
+        '  error = ?',
+        'WHERE run_id = ? AND source = ? AND slug = ? AND version = ?',
+      ].filter(Boolean).join(' '),
+    )
+    .bind(
+      input.status,
+      input.startedAt ?? null,
+      input.completedAt ?? null,
+      updatedAt,
+      input.error ?? null,
+      input.runId,
+      input.source,
+      input.slug,
+      input.version,
+    )
+    .run();
+}
+
+export async function refreshScrapeRunCounters(db: D1Database, runId: string) {
+  await db
+    .prepare(
+      [
+        'UPDATE scrape_runs SET',
+        '  total_jobs = (SELECT COUNT(*) FROM scrape_jobs WHERE run_id = ?),',
+        "  queued_jobs = (SELECT COUNT(*) FROM scrape_jobs WHERE run_id = ? AND status IN ('queued', 'retrying')),",
+        "  running_jobs = (SELECT COUNT(*) FROM scrape_jobs WHERE run_id = ? AND status = 'running'),",
+        "  completed_jobs = (SELECT COUNT(*) FROM scrape_jobs WHERE run_id = ? AND status = 'completed'),",
+        "  failed_jobs = (SELECT COUNT(*) FROM scrape_jobs WHERE run_id = ? AND status = 'failed'),",
+        '  updated_at = ?',
+        'WHERE id = ?',
+      ].join(' '),
+    )
+    .bind(runId, runId, runId, runId, runId, new Date().toISOString(), runId)
+    .run();
+}
+
+export async function reconcileScrapeRunStatus(db: D1Database, runId: string) {
+  const now = new Date().toISOString();
+
+  await db
+    .prepare(
+      [
+        'UPDATE scrape_runs SET',
+        '  status = CASE',
+        "    WHEN EXISTS (SELECT 1 FROM scrape_jobs WHERE run_id = ? AND status IN ('queued', 'running', 'retrying')) THEN 'running'",
+        "    WHEN EXISTS (SELECT 1 FROM scrape_jobs WHERE run_id = ? AND status = 'failed') THEN 'failed'",
+        "    ELSE 'completed'",
+        '  END,',
+        "  completed_at = CASE WHEN NOT EXISTS (SELECT 1 FROM scrape_jobs WHERE run_id = ? AND status IN ('queued', 'running', 'retrying')) THEN ? ELSE NULL END,",
+        "  error = CASE WHEN EXISTS (SELECT 1 FROM scrape_jobs WHERE run_id = ? AND status = 'failed') THEN COALESCE(error, 'One or more scrape jobs failed.') ELSE error END,",
+        '  updated_at = ?',
+        'WHERE id = ?',
+      ].join(' '),
+    )
+    .bind(runId, runId, runId, now, runId, now, runId)
+    .run();
+}
+
+export async function listRecentScrapeRuns(db: D1Database, limit: number) {
+  const result = await db
+    .prepare(
+      [
+        'SELECT id, source, status, total_jobs, queued_jobs, running_jobs, completed_jobs, failed_jobs,',
+        '       created_at, updated_at, completed_at, error',
+        'FROM scrape_runs',
+        'ORDER BY created_at DESC',
+        'LIMIT ?',
+      ].join(' '),
+    )
+    .bind(limit)
+    .all<ScrapeRunRow>();
+
+  return result.results ?? [];
+}
+
+export async function listScrapeJobsForRun(db: D1Database, runId: string, limit: number) {
+  const result = await db
+    .prepare(
+      [
+        'SELECT id, run_id, source, slug, version, status, attempts, queued_at, started_at, completed_at, updated_at, error',
+        'FROM scrape_jobs',
+        'WHERE run_id = ?',
+        'ORDER BY updated_at DESC',
+        'LIMIT ?',
+      ].join(' '),
+    )
+    .bind(runId, limit)
+    .all<ScrapeJobRow>();
+
+  return result.results ?? [];
+}
+
+export async function listQueuedScrapeJobsForRun(db: D1Database, runId: string, limit: number) {
+  const result = await db
+    .prepare(
+      [
+        'SELECT id, run_id, source, slug, version, status, attempts, queued_at, started_at, completed_at, updated_at, error',
+        'FROM scrape_jobs',
+        "WHERE run_id = ? AND status IN ('queued', 'retrying')",
+        'ORDER BY updated_at ASC',
+        'LIMIT ?',
+      ].join(' '),
+    )
+    .bind(runId, limit)
+    .all<ScrapeJobRow>();
+
+  return result.results ?? [];
 }
 
 export async function listClawhubSkills(db: D1Database, input: SkillListQuery) {

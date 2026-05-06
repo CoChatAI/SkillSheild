@@ -4,22 +4,22 @@ on:
   workflow_dispatch:
     inputs:
       execute:
-        description: Execute the scrape against a live scanner.
+        description: Enqueue scrape jobs against a live scanner.
         required: true
         default: false
         type: boolean
       source:
-        description: Scanner source to scrape.
+        description: Scanner source to scrape. ClawHub is currently disabled in production.
         required: true
-        default: clawhub
+        default: skills-sh
         type: choice
         options:
           - clawhub
           - skills-sh
       wait:
-        description: Wait for the scrape request to finish before the workflow exits.
+        description: Use blocking scanner mode. Keep false for full corpus runs; only use true with a small limit for smoke tests.
         required: true
-        default: true
+        default: false
         type: boolean
       limit:
         description: Optional bounded scrape limit.
@@ -44,6 +44,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: full-scrape-${{ inputs.source }}
+  cancel-in-progress: false
 
 jobs:
   prepare:
@@ -106,10 +110,10 @@ jobs:
           fi
 
   run:
-    if: ${{ inputs.execute }}
+    if: ${{ inputs.execute && github.ref_name == github.event.repository.default_branch }}
     needs: prepare
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 15
     environment: production
     env:
       SCANNER_AUTH_TOKEN: ${{ secrets.SCANNER_AUTH_TOKEN }}
@@ -117,6 +121,9 @@ jobs:
       HAS_BASE_URL: ${{ needs.prepare.outputs.has_base_url }}
 
     steps:
+      - name: Require default branch for production scrape runs
+        run: test "$GITHUB_REF_NAME" = "$GITHUB_EVENT_REPOSITORY_DEFAULT_BRANCH"
+
       - name: Require configured scanner endpoint
         run: |
           if [ "$HAS_BASE_URL" != "true" ]; then
@@ -136,3 +143,5 @@ jobs:
             -H "Content-Type: application/json" \
             "${auth_header[@]}" \
             "$ENDPOINT"
+
+          echo "Scrape request accepted. For wait=false runs, monitor queue-backed progress with the Worker status endpoint: /api/v1/scrape-runs."

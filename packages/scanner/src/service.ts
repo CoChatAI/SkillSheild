@@ -1,7 +1,16 @@
+import { randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
-import { scanJobLocatorSchema, type ScanJobLocator, type SkillSource, type SkillVerdict } from '@skillshield/shared';
+import {
+  queuedScanJobSchema,
+  scanJobLocatorSchema,
+  type QueuedScanJob,
+  type ScanFinding,
+  type ScanJobLocator,
+  type SkillSource,
+  type SkillVerdict,
+} from '@skillshield/shared';
 import type { ScanOptions } from './scanner';
-import { determineVerdict, scanSkill } from './scanner';
+import { determineDualVerdict, scanSkill } from './scanner';
 import { publishResults, type PublishVerdict } from './publisher';
 import { ClawHubAdapter } from './adapters/clawhub';
 import { SkillsShAdapter } from './adapters/skills-sh';
@@ -16,8 +25,9 @@ export interface ScannerSkillListItem {
 
 export interface ScannerSourceAdapter {
   source: SkillSource;
-  listAll(): Promise<ScannerSkillListItem[]>;
+  listAll(maxSkills?: number): Promise<ScannerSkillListItem[]>;
   fetch(slug: string, version?: string): Promise<string>;
+  resolveLatestVersion?(slug: string): Promise<string | undefined>;
 }
 
 export type ScanJobRequest = ScanJobLocator;
@@ -30,9 +40,12 @@ export interface ExecuteScanJobResult {
 }
 
 export interface FullScrapeOptions {
+  runId?: string;
   limit?: number;
   scanOptions?: ScanOptions;
   interSkillDelayMs?: number;
+  force?: boolean;
+  recentScanMaxAgeHours?: number;
 }
 
 export interface FullScrapeResult {
@@ -44,10 +57,56 @@ export interface FullScrapeResult {
   verdicts: Record<SkillVerdict, number>;
 }
 
+export interface EnqueueFullSourceScrapeResult {
+  started: true;
+  runId: string;
+  source: SkillSource;
+  discovered: number;
+  queued: number;
+  skipped: number;
+  existingRun?: boolean;
+}
+
+export interface ScrapeRunRecordInput {
+  id: string;
+  source: SkillSource;
+  force?: boolean;
+}
+
+export interface ScrapeRunRecordResult {
+  id: string;
+  existing?: boolean;
+}
+
+export interface ScrapeJobRecordInput {
+  id: string;
+  runId: string;
+  source: SkillSource;
+  slug: string;
+  version: string;
+  force?: boolean;
+  recentScanMaxAgeHours?: number;
+}
+
+export interface ScrapeJobRecordResult {
+  id: string;
+  skipped?: boolean;
+  reason?: string;
+}
+
+export interface ScrapeQueueDependencies {
+  createScrapeRun: (input: ScrapeRunRecordInput) => Promise<void | ScrapeRunRecordResult>;
+  createScrapeJob: (input: ScrapeJobRecordInput) => Promise<void | ScrapeJobRecordResult>;
+  enqueueScanJob: (job: QueuedScanJob) => Promise<void>;
+  refreshScrapeRunCounters?: (runId: string) => Promise<void>;
+  createId?: () => string;
+}
+
 export interface ServiceDependencies {
   adapters?: Partial<Record<SkillSource, ScannerSourceAdapter>>;
   scanSkill?: typeof scanSkill;
   publishResults?: typeof publishResults;
+  scrapeQueue?: ScrapeQueueDependencies;
   sleep?: (milliseconds: number) => Promise<void>;
   removeDir?: (path: string) => Promise<void>;
   logger?: Pick<Console, 'log' | 'error'>;
@@ -57,7 +116,7 @@ const DEFAULT_SCAN_OPTIONS: ScanOptions = {
   useBehavioral: true,
   useLlm: true,
   enableMeta: true,
-  policy: 'strict',
+  policy: 'balanced',
 };
 
 export function createDefaultAdapters(): Partial<Record<SkillSource, ScannerSourceAdapter>> {
@@ -91,8 +150,10 @@ export async function executeScanJob(
 
   try {
     skillDir = await adapter.fetch(slug, job.version);
-    const scanResult = await scanSkillImpl(skillDir, buildScanOptions());
-    const verdict = buildPublishVerdict(scanResult.maxSeverity, scanResult.findingsCount);
+    const scanResult = await scanSkillImpl(skillDir, buildScanOptions(
+      typeof job.useLlm === 'boolean' ? { useLlm: job.useLlm } : {},
+    ));
+    const verdict = buildPublishVerdict(scanResult.maxSeverity, scanResult.findingsCount, scanResult.findings);
     const summary = await resolveSkillFrontmatterSummary({ skillDir, fallback: slug });
 
     await publishResultsImpl({
@@ -138,7 +199,7 @@ export async function runFullSourceScrape(
   const sleepImpl = dependencies.sleep ?? defaultSleep;
   const removeDirImpl = dependencies.removeDir ?? defaultRemoveDir;
   const logger = dependencies.logger ?? console;
-  const discoveredSkills = await adapter.listAll();
+  const discoveredSkills = await adapter.listAll(options.limit);
   const skills = typeof options.limit === 'number'
     ? discoveredSkills.slice(0, options.limit)
     : discoveredSkills;
@@ -158,15 +219,14 @@ export async function runFullSourceScrape(
     let skillDir: string | undefined;
 
     try {
-      const version = skill.latestVersion ?? 'latest';
-      skillDir = await adapter.fetch(skill.slug, skill.latestVersion);
+      const version = await resolveSkillVersion(adapter, skill, logger);
+      skillDir = await adapter.fetch(skill.slug, version);
 
       const scanResult = await scanSkillImpl(skillDir, scanOptions);
-      const verdict = buildPublishVerdict(scanResult.maxSeverity, scanResult.findingsCount);
+      const verdict = buildPublishVerdict(scanResult.maxSeverity, scanResult.findingsCount, scanResult.findings);
       const summary = await resolveSkillFrontmatterSummary({ skillDir, fallback: skill.slug });
-      const baseMetadata = buildMetadata(skill);
       const metadata: SkillRecordMetadata = {
-        ...baseMetadata,
+        ...buildMetadata(skill),
         category: summary.category,
         description: summary.description,
       };
@@ -211,14 +271,116 @@ export async function runFullSourceScrape(
   };
 }
 
-export function buildPublishVerdict(maxSeverity: string, findingsCount: number): PublishVerdict {
-  const verdict = determineVerdict({ maxSeverity: normalizeSeverity(maxSeverity) });
-  const severity = normalizeSeverity(maxSeverity);
+export async function enqueueFullSourceScrape(
+  sourceInput: SkillSource,
+  options: Pick<FullScrapeOptions, 'runId' | 'limit' | 'scanOptions' | 'force' | 'recentScanMaxAgeHours'> = {},
+  dependencies: ServiceDependencies = {},
+): Promise<EnqueueFullSourceScrapeResult> {
+  const source = parseSource(sourceInput);
+  const adapter = requireAdapter(source, dependencies.adapters);
+  const scrapeQueue = requireScrapeQueue(dependencies.scrapeQueue);
+  const logger = dependencies.logger ?? console;
+  const requestedRunId = options.runId ?? scrapeQueue.createId?.() ?? randomUUID();
+  const runRecord = await scrapeQueue.createScrapeRun({ id: requestedRunId, source, force: options.force });
+  const runId = runRecord?.id ?? requestedRunId;
+
+  if (runRecord?.existing) {
+    logger.log(`[scrape] Reusing active ${source} scrape run ${runId}`);
+    return {
+      started: true,
+      runId,
+      source,
+      discovered: 0,
+      queued: 0,
+      skipped: 0,
+      existingRun: true,
+    };
+  }
+
+  const discoveredSkills = await adapter.listAll(options.limit);
+  const skills = typeof options.limit === 'number'
+    ? discoveredSkills.slice(0, options.limit)
+    : discoveredSkills;
+
+  logger.log(`[scrape] Found ${discoveredSkills.length} skills in ${source}`);
+
+  let queued = 0;
+  let skipped = 0;
+  for (const skill of skills) {
+    const version = await resolveSkillVersion(adapter, skill, logger);
+    const jobId = scrapeQueue.createId?.() ?? randomUUID();
+
+    const jobRecord = await scrapeQueue.createScrapeJob({
+      id: jobId,
+      runId,
+      source,
+      slug: skill.slug,
+      version,
+      force: options.force,
+      recentScanMaxAgeHours: options.recentScanMaxAgeHours,
+    });
+
+    if (jobRecord?.skipped) {
+      skipped += 1;
+      continue;
+    }
+
+    await scrapeQueue.enqueueScanJob(queuedScanJobSchema.parse({
+      type: 'scan',
+      source,
+      slug: skill.slug,
+      version,
+      useLlm: options.scanOptions?.useLlm,
+      run_id: runId,
+      job_id: jobId,
+      triggered_by: 'full_scrape',
+      event_id: runId,
+    }));
+
+    queued += 1;
+  }
+
+  await scrapeQueue.refreshScrapeRunCounters?.(runId);
 
   return {
-    verdict,
+    started: true,
+    runId,
+    source,
+    discovered: discoveredSkills.length,
+    queued,
+    skipped,
+  };
+}
+
+async function resolveSkillVersion(
+  adapter: ScannerSourceAdapter,
+  skill: ScannerSkillListItem,
+  logger: Pick<Console, 'error'>,
+) {
+  if (adapter.resolveLatestVersion) {
+    try {
+      const resolvedVersion = await adapter.resolveLatestVersion(skill.slug);
+      if (resolvedVersion) {
+        return resolvedVersion;
+      }
+    } catch (error) {
+      logger.error(`[scrape] Failed to resolve latest version for ${adapter.source}/${skill.slug}`, error);
+    }
+  }
+
+  return skill.latestVersion ?? 'latest';
+}
+
+export function buildPublishVerdict(maxSeverity: string, findingsCount: number, findings: ScanFinding[] = []): PublishVerdict {
+  const severity = normalizeSeverity(maxSeverity);
+  const dual = determineDualVerdict({ maxSeverity: severity, findings });
+
+  return {
+    verdict: dual.verdict,
     severity,
     findingsCount,
+    complianceVerdict: dual.complianceVerdict,
+    complianceSeverity: severity,
   };
 }
 
@@ -267,6 +429,14 @@ function requireAdapter(
   }
 
   return adapter;
+}
+
+function requireScrapeQueue(scrapeQueue: ScrapeQueueDependencies | undefined) {
+  if (!scrapeQueue) {
+    throw new Error('Scrape queue dependencies are not configured. Use wait=true for local blocking smoke checks.');
+  }
+
+  return scrapeQueue;
 }
 
 function resolveSlug(input: ScanJobLocator) {

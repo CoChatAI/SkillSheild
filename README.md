@@ -223,11 +223,27 @@ npx pnpm@10.6.3 --filter @skillshield/dashboard test
 
 ## Deployment
 
-The repo is structured so that the remaining production work is cutover-only: real secrets, real account-specific IDs, deploy/apply, initial scrapes, and webhook registration.
+Run the setup script from the repo root:
 
-For the exact production sequence, use:
+```bash
+./scripts/setup-production.sh
+```
 
-- `docs/production-cutover-runbook.md`
+It will prompt you for the values it needs, generate secrets, save everything to a local `.secrets` file, and deploy in the correct order:
+
+1. Apply Terraform (D1, R2, Queue, DNS)
+2. Deploy Worker
+3. Set Worker secrets
+4. Apply D1 schema
+5. Deploy scanner to Fly
+6. Set GitHub CI secrets
+7. Run a bounded scrape to verify
+
+After the script finishes, the only manual steps are:
+- run full scrapes
+- register upstream webhooks
+
+For the detailed manual sequence, see `docs/production-cutover-runbook.md`.
 
 ### Deployment components
 
@@ -290,6 +306,7 @@ That means the main remaining launch steps are:
 ## Related Docs
 
 - `docs/production-cutover-runbook.md`
+- `docs/public-repo-deploy-safety.md`
 - `plan.md`
 
 ## Contributing

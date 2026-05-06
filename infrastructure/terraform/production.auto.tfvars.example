@@ -1,0 +1,3 @@
+cloudflare_account_id = "YOUR_CLOUDFLARE_ACCOUNT_ID"
+cloudflare_zone_id    = "YOUR_CLOUDFLARE_ZONE_ID"
+worker_dns_target     = "skillshield-worker.YOUR_WORKERS_SUBDOMAIN.workers.dev"

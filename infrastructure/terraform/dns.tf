@@ -1,8 +1,5 @@
-resource "cloudflare_workers_route" "worker" {
-  zone_id = var.cloudflare_zone_id
-  pattern = var.worker_route
-  script  = var.worker_name
-}
+# The Worker route is managed by Wrangler via the routes config in wrangler.toml.
+# Do not also manage it here or Terraform and Wrangler will conflict.
 
 resource "cloudflare_dns_record" "worker_hostname" {
   zone_id = var.cloudflare_zone_id

@@ -68,7 +68,8 @@ describe('scanner wrapper', () => {
       expect.objectContaining({
         timeout: 120000,
         env: expect.objectContaining({
-          SKILL_SCANNER_LLM_MODEL: 'claude-sonnet-4-20250514',
+          SKILL_SCANNER_LLM_MODEL: 'openrouter/minimax/minimax-m2.5:free',
+          SKILL_SCANNER_LLM_BASE_URL: 'https://openrouter.ai/api/v1',
         }),
       }),
     );
@@ -132,10 +133,10 @@ describe('scanner wrapper', () => {
 
 describe('determineVerdict', () => {
   it('maps medium severity to caution', () => {
-    expect(determineVerdict({ maxSeverity: 'medium' })).toBe('caution');
+    expect(determineVerdict({ maxSeverity: 'medium', findings: [] })).toBe('caution');
   });
 
   it('maps low severity to verified', () => {
-    expect(determineVerdict({ maxSeverity: 'low' })).toBe('verified');
+    expect(determineVerdict({ maxSeverity: 'low', findings: [] })).toBe('verified');
   });
 });

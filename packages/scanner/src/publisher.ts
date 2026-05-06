@@ -16,6 +16,8 @@ export interface PublishVerdict {
   verdict: SkillVerdict;
   severity: ScanSeverity;
   findingsCount: number;
+  complianceVerdict: SkillVerdict;
+  complianceSeverity: ScanSeverity;
 }
 
 export interface PublishInput {
@@ -145,6 +147,8 @@ export async function publishResults(
     verdict: input.verdict.verdict,
     severity: input.verdict.severity,
     findingsCount: input.verdict.findingsCount,
+    complianceVerdict: input.verdict.complianceVerdict,
+    complianceSeverity: input.verdict.complianceSeverity,
     r2Key: shouldPublishAssets(input.verdict.verdict) ? keys.latestAssetKey : null,
     reportKey: keys.reportKey,
     scanResult: input.scanResult,

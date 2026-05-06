@@ -46,6 +46,41 @@ describe('worker queue consumer', () => {
     expect(message.retry).not.toHaveBeenCalled();
   });
 
+  it('marks tracked scrape jobs running and completed around dispatch', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ success: true }), { status: 200 }));
+    const database = createRecordingDatabase();
+    const job = createQueuedJob({ run_id: 'run-1', job_id: 'job-1' });
+    const message = createQueueMessage(job);
+
+    vi.stubGlobal('fetch', fetchMock);
+    await consumeScanQueue(createBatch(message) as QueueConsumerBatch, createEnv({ database }));
+
+    expect(database.statements.map((statement) => statement.params[0])).toEqual([
+      'running',
+      'running',
+      'run-1',
+      'completed',
+      'run-1',
+      'run-1',
+    ]);
+    expect(message.ack).toHaveBeenCalledTimes(1);
+  });
+
+  it('acks disabled source jobs without forwarding them', async () => {
+    const fetchMock = vi.fn();
+    const database = createRecordingDatabase();
+    const message = createQueueMessage(createQueuedJob({ run_id: 'run-1', job_id: 'job-1' }));
+
+    vi.stubGlobal('fetch', fetchMock);
+    await consumeScanQueue(createBatch(message) as QueueConsumerBatch, createEnv({ database, disabledSources: 'clawhub' }));
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(database.statements[0]?.params[0]).toBe('failed');
+    expect(database.statements[0]?.params[4]).toBe('Source is disabled: clawhub');
+    expect(message.ack).toHaveBeenCalledTimes(1);
+    expect(message.retry).not.toHaveBeenCalled();
+  });
+
   it('retries a message when scanner forwarding fails', async () => {
     const fetchMock = vi.fn(async () => new Response('upstream error', { status: 502 }));
     const message = createQueueMessage(createQueuedJob());
@@ -56,6 +91,37 @@ describe('worker queue consumer', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(message.retry).toHaveBeenCalledTimes(1);
     expect(message.ack).not.toHaveBeenCalled();
+  });
+
+  it('marks tracked scrape jobs retrying when dispatch fails', async () => {
+    const fetchMock = vi.fn(async () => new Response('upstream error', { status: 502 }));
+    const database = createRecordingDatabase();
+    const message = createQueueMessage(createQueuedJob({ run_id: 'run-1', job_id: 'job-1' }));
+
+    vi.stubGlobal('fetch', fetchMock);
+    await consumeScanQueue(createBatch(message) as QueueConsumerBatch, createEnv({ database }));
+
+    expect(database.statements.map((statement) => statement.params[0])).toEqual([
+      'running',
+      'running',
+      'run-1',
+      'retrying',
+      'run-1',
+      'run-1',
+    ]);
+    expect(message.retry).toHaveBeenCalledTimes(1);
+  });
+
+  it('marks tracked scrape jobs failed on the configured final attempt', async () => {
+    const fetchMock = vi.fn(async () => new Response('upstream error', { status: 502 }));
+    const database = createRecordingDatabase();
+    const message = createQueueMessage(createQueuedJob({ run_id: 'run-1', job_id: 'job-1' }), { attempts: 9 });
+
+    vi.stubGlobal('fetch', fetchMock);
+    await consumeScanQueue(createBatch(message) as QueueConsumerBatch, createEnv({ database }));
+
+    expect(database.statements[3]?.params[0]).toBe('failed');
+    expect(message.retry).toHaveBeenCalledTimes(1);
   });
 
   it('drops invalid queue payloads without forwarding them', async () => {
@@ -71,21 +137,23 @@ describe('worker queue consumer', () => {
   });
 });
 
-function createEnv(options: { scannerAuthToken?: string } = {}): WorkerBindings {
+function createEnv(options: { scannerAuthToken?: string; database?: D1Database; disabledSources?: string } = {}): WorkerBindings {
   return {
-    DB: {} as never,
+    DB: options.database ?? ({} as never),
     SKILLS_BUCKET: {} as never,
     REPORTS_BUCKET: {} as never,
     META_BUCKET: {} as never,
     SCAN_QUEUE: {} as never,
     SCANNER_BASE_URL: 'https://skillshield-scanner.fly.dev',
     SCANNER_REQUEST_TIMEOUT_MS: '30000',
+    SCAN_QUEUE_MAX_ATTEMPTS: '9',
+    DISABLED_SOURCES: options.disabledSources,
     SCANNER_AUTH_TOKEN: options.scannerAuthToken,
     ENVIRONMENT: 'test',
   };
 }
 
-function createQueuedJob(): QueuedScanJob {
+function createQueuedJob(overrides: Partial<QueuedScanJob> = {}): QueuedScanJob {
   return {
     type: 'scan',
     source: 'clawhub',
@@ -94,7 +162,25 @@ function createQueuedJob(): QueuedScanJob {
     owner: 'Acme',
     triggered_by: 'webhook',
     event_id: 'event-123',
+    ...overrides,
   };
+}
+
+function createRecordingDatabase() {
+  const statements: Array<{ sql: string; params: unknown[] }> = [];
+
+  return {
+    statements,
+    prepare(sql: string) {
+      return {
+        bind(...params: unknown[]) {
+          statements.push({ sql, params });
+          return this;
+        },
+        run: vi.fn(async () => ({ success: true }) as D1Result<unknown>),
+      } as unknown as D1PreparedStatement;
+    },
+  } as D1Database & { statements: Array<{ sql: string; params: unknown[] }> };
 }
 
 function createBatch(message: QueueTestMessage): QueueTestBatch {
@@ -106,11 +192,11 @@ function createBatch(message: QueueTestMessage): QueueTestBatch {
   };
 }
 
-function createQueueMessage(body: unknown): QueueTestMessage {
+function createQueueMessage(body: unknown, options: { attempts?: number } = {}): QueueTestMessage {
   return {
     id: 'message-1',
     timestamp: new Date('2026-03-30T12:15:00.000Z'),
-    attempts: 1,
+    attempts: options.attempts ?? 1,
     body,
     ack: vi.fn(),
     retry: vi.fn(),

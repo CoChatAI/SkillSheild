@@ -20,6 +20,7 @@ const scanJobLocatorFields = z.object({
   slug: z.string().trim().min(1).optional(),
   repo: z.string().trim().min(1).optional(),
   version: z.string().trim().min(1).optional(),
+  useLlm: z.boolean().optional(),
 });
 
 export const scanJobLocatorSchema = scanJobLocatorFields.refine((job) => job.slug || job.repo, {
@@ -28,6 +29,8 @@ export const scanJobLocatorSchema = scanJobLocatorFields.refine((job) => job.slu
 
 export const queuedScanJobSchema = scanJobLocatorFields.extend({
   type: z.literal('scan'),
+  run_id: z.string().trim().min(1).optional(),
+  job_id: z.string().trim().min(1).optional(),
   owner: z.string().trim().min(1).optional(),
   triggered_by: z.string().trim().min(1),
   event_id: z.string().trim().min(1),

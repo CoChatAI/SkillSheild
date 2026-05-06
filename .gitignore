@@ -15,3 +15,11 @@ tmp/
 *.tfstate
 *.tfstate.*
 .terraform/
+terraform.tfvars
+*.auto.tfvars
+
+# Local shell/env tooling
+.envrc
+
+# Generated deploy secrets
+.secrets

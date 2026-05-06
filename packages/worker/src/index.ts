@@ -1,9 +1,15 @@
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { renderDashboardPage } from '@skillshield/dashboard';
-import { healthResponseSchema, queuedScanJobSchema } from '@skillshield/shared';
+import { healthResponseSchema, queuedScanJobSchema, type QueuedScanJob } from '@skillshield/shared';
 import { buildPublicBadgeUrl, buildPublicReportUrl } from './lib/public';
-import { listRecentSkills } from './lib/d1';
+import {
+  listRecentSkills,
+  reconcileScrapeRunStatus,
+  refreshScrapeRunCounters,
+  updateScrapeJobStatus,
+  updateScrapeRunStatus,
+} from './lib/d1';
 import { apiCompatibilityRoutes, apiRoutes } from './routes/api';
 import { badgeRoutes } from './routes/badges';
 import { clawhubRoutes } from './routes/clawhub';
@@ -11,6 +17,7 @@ import { reportsRoutes } from './routes/reports';
 import { skillsRoutes } from './routes/skills';
 import type { WorkerBindings } from './types';
 import { webhookRoutes } from './routes/webhooks';
+import { enterpriseClawhubRoutes, enterpriseSearchRoutes, enterpriseSkillsRoutes } from './routes/enterprise';
 
 export function createApp() {
   const app = new Hono<{ Bindings: WorkerBindings }>();
@@ -91,6 +98,11 @@ export function createApp() {
   app.route('/badge', badgeRoutes);
   app.route('/webhooks', webhookRoutes);
 
+  // Enterprise routes — same CLI compatibility, stricter compliance verdicts
+  app.route('/enterprise/clawhub/api/v1', enterpriseClawhubRoutes);
+  app.route('/enterprise/skills', enterpriseSkillsRoutes);
+  app.route('/enterprise/api', enterpriseSearchRoutes);
+
   app.notFound((c) =>
     c.json(
       {
@@ -125,7 +137,18 @@ export async function consumeScanQueue(batch: MessageBatch<unknown>, env: Worker
       continue;
     }
 
+    if (isSourceDisabled(env, parsedJob.data.source)) {
+      await recordTrackedJobStatus(
+        () => markTrackedJobFailed(env, parsedJob.data, new Error(`Source is disabled: ${parsedJob.data.source}`)),
+        message.id,
+      );
+      message.ack();
+      continue;
+    }
+
     try {
+      await recordTrackedJobStatus(() => markTrackedJobRunning(env, parsedJob.data), message.id);
+
       const response = await fetch(buildScannerScanUrl(env.SCANNER_BASE_URL), {
         method: 'POST',
         headers: buildScannerHeaders(env),
@@ -137,15 +160,137 @@ export async function consumeScanQueue(batch: MessageBatch<unknown>, env: Worker
         throw new Error(`Scanner responded with ${response.status}`);
       }
 
+      await recordTrackedJobStatus(() => markTrackedJobCompleted(env, parsedJob.data), message.id);
       message.ack();
     } catch (error) {
       console.error('[queue] Failed to forward scan job to scanner', {
         messageId: message.id,
         error,
       });
+      await recordTrackedJobStatus(() => markTrackedJobRetrying(env, parsedJob.data, message.attempts, error), message.id);
       message.retry();
     }
   }
+}
+
+async function recordTrackedJobStatus(operation: () => Promise<void>, messageId: string) {
+  try {
+    await operation();
+  } catch (error) {
+    console.error('[queue] Failed to update scrape tracking status', {
+      messageId,
+      error,
+    });
+  }
+}
+
+async function markTrackedJobRunning(env: WorkerBindings, job: QueuedScanJob) {
+  const trackingInput = buildScrapeJobTrackingInput(job);
+  if (!trackingInput) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+  await updateScrapeRunStatus(env.DB, {
+    id: trackingInput.runId,
+    status: 'running',
+    updatedAt: now,
+  });
+  await updateScrapeJobStatus(env.DB, {
+    ...trackingInput,
+    status: 'running',
+    startedAt: now,
+    updatedAt: now,
+    incrementAttempts: true,
+  });
+  await refreshScrapeRunCounters(env.DB, trackingInput.runId);
+}
+
+async function markTrackedJobCompleted(env: WorkerBindings, job: QueuedScanJob) {
+  const trackingInput = buildScrapeJobTrackingInput(job);
+  if (!trackingInput) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+  await updateScrapeJobStatus(env.DB, {
+    ...trackingInput,
+    status: 'completed',
+    completedAt: now,
+    updatedAt: now,
+  });
+  await refreshScrapeRunCounters(env.DB, trackingInput.runId);
+  await reconcileScrapeRunStatus(env.DB, trackingInput.runId);
+}
+
+async function markTrackedJobFailed(env: WorkerBindings, job: QueuedScanJob, error: unknown) {
+  const trackingInput = buildScrapeJobTrackingInput(job);
+  if (!trackingInput) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+  await updateScrapeJobStatus(env.DB, {
+    ...trackingInput,
+    status: 'failed',
+    completedAt: now,
+    updatedAt: now,
+    error: error instanceof Error ? error.message : String(error),
+  });
+  await refreshScrapeRunCounters(env.DB, trackingInput.runId);
+  await reconcileScrapeRunStatus(env.DB, trackingInput.runId);
+}
+
+async function markTrackedJobRetrying(env: WorkerBindings, job: QueuedScanJob, attempts: number, error: unknown) {
+  const trackingInput = buildScrapeJobTrackingInput(job);
+  if (!trackingInput) {
+    return;
+  }
+
+  const now = new Date().toISOString();
+  const status = attempts >= resolveScanQueueMaxAttempts(env) ? 'failed' : 'retrying';
+
+  await updateScrapeJobStatus(env.DB, {
+    ...trackingInput,
+    status,
+    completedAt: status === 'failed' ? now : undefined,
+    updatedAt: now,
+    error: error instanceof Error ? error.message : String(error),
+  });
+  await refreshScrapeRunCounters(env.DB, trackingInput.runId);
+  await reconcileScrapeRunStatus(env.DB, trackingInput.runId);
+}
+
+function isSourceDisabled(env: Pick<WorkerBindings, 'DISABLED_SOURCES'>, source: string) {
+  return (env.DISABLED_SOURCES ?? '')
+    .split(',')
+    .map((disabledSource) => disabledSource.trim())
+    .some((disabledSource) => disabledSource === source);
+}
+
+function resolveScanQueueMaxAttempts(env: Pick<WorkerBindings, 'SCAN_QUEUE_MAX_ATTEMPTS'>) {
+  const parsedAttempts = Number(env.SCAN_QUEUE_MAX_ATTEMPTS);
+
+  if (!Number.isFinite(parsedAttempts) || parsedAttempts <= 0) {
+    return 9;
+  }
+
+  return parsedAttempts;
+}
+
+function buildScrapeJobTrackingInput(job: QueuedScanJob) {
+  const slug = job.slug ?? job.repo;
+
+  if (!job.run_id || !slug || !job.version) {
+    return undefined;
+  }
+
+  return {
+    runId: job.run_id,
+    source: job.source,
+    slug,
+    version: job.version,
+  };
 }
 
 function resolveScannerRequestTimeoutMs(env: Pick<WorkerBindings, 'SCANNER_REQUEST_TIMEOUT_MS'>) {

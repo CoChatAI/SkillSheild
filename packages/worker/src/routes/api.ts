@@ -1,11 +1,22 @@
 import { Hono } from 'hono';
-import { searchResponseSchema } from '@skillshield/shared';
+import { queuedScanJobSchema, searchResponseSchema, sourceSchema } from '@skillshield/shared';
 import {
+  createScrapeRun,
+  getActiveScrapeRun,
   getSkillBySourceAndSlug,
+  hasRecentCompletedScan,
+  listRecentScrapeRuns,
   listRecentSkills,
+  listQueuedScrapeJobsForRun,
+  listScrapeJobsForRun,
   parseSkillMetadata,
   parseSkillSearchSort,
+  reconcileScrapeRunStatus,
   searchSkills,
+  upsertScrapeJob,
+  refreshScrapeRunCounters,
+  type ScrapeJobRow,
+  type ScrapeRunRow,
   type SkillRow,
 } from '../lib/d1';
 import { buildPublicBadgeUrl, buildPublicReportUrl } from '../lib/public';
@@ -116,6 +127,146 @@ apiRoutes.get('/recent', async (c) => {
   });
 });
 
+apiRoutes.get('/scrape-runs', async (c) => {
+  if (!isAuthorizedOperatorRequest(c.req.raw, c.env)) {
+    return c.json({ error: 'unauthorized' }, 401, { 'Cache-Control': 'no-store' });
+  }
+
+  const requestedLimit = Number.parseInt(c.req.query('limit') ?? '20', 10);
+  const limit = Number.isNaN(requestedLimit) ? 20 : Math.min(Math.max(requestedLimit, 1), 100);
+  const runs = await listRecentScrapeRuns(c.env.DB, limit);
+
+  return c.json({
+    runs: runs.map(buildScrapeRunRecord),
+    count: runs.length,
+  }, 200, { 'Cache-Control': 'no-store' });
+});
+
+apiRoutes.post('/scrape-runs', async (c) => {
+  if (!isAuthorizedOperatorRequest(c.req.raw, c.env)) {
+    return c.json({ error: 'unauthorized' }, 401, { 'Cache-Control': 'no-store' });
+  }
+
+  const parsedBody = parseCreateScrapeRunRequest(await c.req.json());
+  if (!parsedBody.success) {
+    return c.json({ error: parsedBody.error }, 400, { 'Cache-Control': 'no-store' });
+  }
+
+  if (!parsedBody.data.force) {
+    const activeRun = await getActiveScrapeRun(c.env.DB, parsedBody.data.source);
+    if (activeRun) {
+      return c.json({ success: true, id: activeRun.id, existing: true }, 200, { 'Cache-Control': 'no-store' });
+    }
+  }
+
+  await createScrapeRun(c.env.DB, parsedBody.data);
+
+  return c.json({ success: true, id: parsedBody.data.id, existing: false }, 201, { 'Cache-Control': 'no-store' });
+});
+
+apiRoutes.get('/scrape-runs/:runId/jobs', async (c) => {
+  if (!isAuthorizedOperatorRequest(c.req.raw, c.env)) {
+    return c.json({ error: 'unauthorized' }, 401, { 'Cache-Control': 'no-store' });
+  }
+
+  const requestedLimit = Number.parseInt(c.req.query('limit') ?? '100', 10);
+  const limit = Number.isNaN(requestedLimit) ? 100 : Math.min(Math.max(requestedLimit, 1), 500);
+  const jobs = await listScrapeJobsForRun(c.env.DB, c.req.param('runId'), limit);
+
+  return c.json({
+    run_id: c.req.param('runId'),
+    jobs: jobs.map(buildScrapeJobRecord),
+    count: jobs.length,
+  }, 200, { 'Cache-Control': 'no-store' });
+});
+
+apiRoutes.post('/scrape-runs/:runId/jobs', async (c) => {
+  if (!isAuthorizedOperatorRequest(c.req.raw, c.env)) {
+    return c.json({ error: 'unauthorized' }, 401, { 'Cache-Control': 'no-store' });
+  }
+
+  const runId = c.req.param('runId');
+  const parsedBody = parseCreateScrapeJobRequest(await c.req.json());
+  if (!parsedBody.success) {
+    return c.json({ error: parsedBody.error }, 400, { 'Cache-Control': 'no-store' });
+  }
+
+  if (parsedBody.data.runId !== runId) {
+    return c.json({ error: 'Scrape job runId must match the route runId.' }, 400, { 'Cache-Control': 'no-store' });
+  }
+
+  if (!parsedBody.data.force && typeof parsedBody.data.recentScanMaxAgeHours === 'number' && parsedBody.data.recentScanMaxAgeHours > 0) {
+    const since = new Date(Date.now() - parsedBody.data.recentScanMaxAgeHours * 60 * 60 * 1000).toISOString();
+    const recentlyScanned = await hasRecentCompletedScan(c.env.DB, {
+      source: parsedBody.data.source,
+      slug: parsedBody.data.slug,
+      version: parsedBody.data.version,
+      since,
+    });
+
+    if (recentlyScanned) {
+      return c.json({ success: true, id: parsedBody.data.id, skipped: true, reason: 'recently_scanned' }, 200, { 'Cache-Control': 'no-store' });
+    }
+  }
+
+  await upsertScrapeJob(c.env.DB, parsedBody.data);
+
+  return c.json({ success: true, id: parsedBody.data.id, skipped: false }, 201, { 'Cache-Control': 'no-store' });
+});
+
+apiRoutes.post('/scrape-runs/:runId/refresh-counters', async (c) => {
+  if (!isAuthorizedOperatorRequest(c.req.raw, c.env)) {
+    return c.json({ error: 'unauthorized' }, 401, { 'Cache-Control': 'no-store' });
+  }
+
+  await refreshScrapeRunCounters(c.env.DB, c.req.param('runId'));
+  await reconcileScrapeRunStatus(c.env.DB, c.req.param('runId'));
+
+  return c.json({ success: true }, 200, { 'Cache-Control': 'no-store' });
+});
+
+apiRoutes.post('/scrape-runs/:runId/requeue', async (c) => {
+  if (!isAuthorizedOperatorRequest(c.req.raw, c.env)) {
+    return c.json({ error: 'unauthorized' }, 401, { 'Cache-Control': 'no-store' });
+  }
+
+  const requestedLimit = Number.parseInt(c.req.query('limit') ?? '500', 10);
+  const limit = Number.isNaN(requestedLimit) ? 500 : Math.min(Math.max(requestedLimit, 1), 5000);
+  const runId = c.req.param('runId');
+  const jobs = await listQueuedScrapeJobsForRun(c.env.DB, runId, limit);
+  const messages = jobs.map((job) => queuedScanJobSchema.parse({
+    type: 'scan',
+    source: job.source,
+    slug: job.slug,
+    version: job.version,
+    run_id: job.run_id,
+    job_id: job.id,
+    triggered_by: 'full_scrape_requeue',
+    event_id: runId,
+  }));
+
+  for (const batch of chunk(messages, 100)) {
+    await c.env.SCAN_QUEUE.sendBatch(batch.map((body) => ({ body })));
+  }
+
+  return c.json({ success: true, run_id: runId, requeued: messages.length }, 202, { 'Cache-Control': 'no-store' });
+});
+
+apiRoutes.post('/scan-queue', async (c) => {
+  if (!isAuthorizedOperatorRequest(c.req.raw, c.env)) {
+    return c.json({ error: 'unauthorized' }, 401, { 'Cache-Control': 'no-store' });
+  }
+
+  const parsedBody = queuedScanJobSchema.safeParse(await c.req.json());
+  if (!parsedBody.success) {
+    return c.json({ error: parsedBody.error.issues[0]?.message ?? 'Invalid scan queue payload.' }, 400, { 'Cache-Control': 'no-store' });
+  }
+
+  await c.env.SCAN_QUEUE.send(parsedBody.data);
+
+  return c.json({ success: true }, 202, { 'Cache-Control': 'no-store' });
+});
+
 function buildSearchSkillRecord(row: SkillRow) {
   return {
     id: row.id,
@@ -124,14 +275,14 @@ function buildSearchSkillRecord(row: SkillRow) {
     name: row.name,
     description: row.description,
     author: row.author,
-    category: row.category,
+    category: row.category ?? null,
     latestVersion: row.latest_version,
     latestScannedVersion: row.latest_scanned_version,
     verdict: row.verdict,
     scanSeverity: row.scan_severity,
     findingsCount: row.findings_count ?? 0,
     installs: row.installs ?? 0,
-    installsUpdatedAt: row.installs_updated_at,
+    installsUpdatedAt: row.installs_updated_at ?? null,
     firstSeenAt: row.first_seen_at ?? row.last_updated_at ?? new Date(0).toISOString(),
     lastScannedAt: row.last_scanned_at,
     lastUpdatedAt: row.last_updated_at ?? new Date(0).toISOString(),
@@ -153,6 +304,140 @@ function buildRecentSkillRecord(row: SkillRow) {
     report: buildPublicReportUrl(row.source as 'clawhub' | 'skills-sh', row.slug),
     badge: buildPublicBadgeUrl(row.source as 'clawhub' | 'skills-sh', row.slug),
   };
+}
+
+function buildScrapeRunRecord(row: ScrapeRunRow) {
+  return {
+    id: row.id,
+    source: row.source,
+    status: row.status,
+    total_jobs: row.total_jobs,
+    queued_jobs: row.queued_jobs,
+    running_jobs: row.running_jobs,
+    completed_jobs: row.completed_jobs,
+    failed_jobs: row.failed_jobs,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+    completed_at: row.completed_at,
+    error: row.error,
+  };
+}
+
+function buildScrapeJobRecord(row: ScrapeJobRow) {
+  return {
+    id: row.id,
+    run_id: row.run_id,
+    source: row.source,
+    slug: row.slug,
+    version: row.version,
+    status: row.status,
+    attempts: row.attempts,
+    queued_at: row.queued_at,
+    started_at: row.started_at,
+    completed_at: row.completed_at,
+    updated_at: row.updated_at,
+    error: row.error,
+  };
+}
+
+function isAuthorizedOperatorRequest(request: Request, env: WorkerBindings) {
+  const authorizationHeader = request.headers.get('Authorization');
+  const validTokens = [env.SCANNER_AUTH_TOKEN, env.WEBHOOK_SECRET].filter((token): token is string => {
+    return typeof token === 'string' && token.length > 0;
+  });
+
+  return validTokens.some((token) => authorizationHeader === `Bearer ${token}`);
+}
+
+function chunk<T>(items: T[], size: number) {
+  const chunks: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    chunks.push(items.slice(index, index + size));
+  }
+
+  return chunks;
+}
+
+function parseCreateScrapeRunRequest(body: unknown) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { success: false as const, error: 'Invalid scrape run payload.' };
+  }
+
+  const record = body as Record<string, unknown>;
+  const id = normalizeRequiredString(record.id);
+  const source = sourceSchema.safeParse(record.source);
+  const force = normalizeOptionalBoolean(record.force);
+
+  if (!id || !source.success || force === 'invalid') {
+    return { success: false as const, error: 'Invalid scrape run payload.' };
+  }
+
+  return { success: true as const, data: { id, source: source.data, force: force ?? false } };
+}
+
+function parseCreateScrapeJobRequest(body: unknown) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { success: false as const, error: 'Invalid scrape job payload.' };
+  }
+
+  const record = body as Record<string, unknown>;
+  const id = normalizeRequiredString(record.id);
+  const runId = normalizeRequiredString(record.runId);
+  const source = sourceSchema.safeParse(record.source);
+  const slug = normalizeRequiredString(record.slug);
+  const version = normalizeRequiredString(record.version);
+  const force = normalizeOptionalBoolean(record.force);
+  const recentScanMaxAgeHours = normalizeOptionalNonNegativeNumber(record.recentScanMaxAgeHours);
+
+  if (!id || !runId || !source.success || !slug || !version || force === 'invalid' || recentScanMaxAgeHours === 'invalid') {
+    return { success: false as const, error: 'Invalid scrape job payload.' };
+  }
+
+  return {
+    success: true as const,
+    data: {
+      id,
+      runId,
+      source: source.data,
+      slug,
+      version,
+      force: force ?? false,
+      recentScanMaxAgeHours,
+    },
+  };
+}
+
+function normalizeOptionalBoolean(value: unknown) {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  return 'invalid' as const;
+}
+
+function normalizeOptionalNonNegativeNumber(value: unknown) {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+    return value;
+  }
+
+  return 'invalid' as const;
+}
+
+function normalizeRequiredString(value: unknown) {
+  if (typeof value !== 'string') {
+    return undefined;
+  }
+
+  const trimmedValue = value.trim();
+  return trimmedValue ? trimmedValue : undefined;
 }
 
 function buildSkillsShCompatibilityRecord(row: SkillRow) {

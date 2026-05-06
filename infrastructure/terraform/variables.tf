@@ -15,9 +15,9 @@ variable "environment" {
 }
 
 variable "worker_name" {
-  description = "Cloudflare Worker script name."
+  description = "Cloudflare Worker script name. Wrangler appends the env name, so --env production produces skillshield-worker-production."
   type        = string
-  default     = "skillshield-worker"
+  default     = "skillshield-worker-production"
 }
 
 variable "worker_route" {

@@ -6,6 +6,7 @@ import {
   type ScanPolicy,
   type ScanSeverity,
   type SkillScanResult,
+  type SkillVerdict,
 } from '@skillshield/shared';
 import { execFileAsync, makeTempDir } from './utils';
 
@@ -86,16 +87,75 @@ export async function scanSkill(
   }
 }
 
-export function determineVerdict(result: Pick<SkillScanResult, 'maxSeverity'>) {
+/**
+ * Categories that represent actual security threats.
+ * Only findings in these categories can trigger a `blocked` verdict.
+ * Non-security findings (like missing license) cap out at `caution`.
+ */
+const SECURITY_CATEGORIES = new Set([
+  'credential harvesting',
+  'data exfiltration',
+  'harmful content',
+  'injection attack',
+  'prompt injection',
+  'protocol manipulation',
+  'resource abuse',
+  'security violation',
+  'supply chain attack',
+  'suspicious code execution',
+  'suspicious code',
+  'system manipulation',
+  'scanner_error',
+]);
+
+function isSecurityFinding(finding: Pick<ScanFinding, 'category'>) {
+  return SECURITY_CATEGORIES.has(finding.category.toLowerCase());
+}
+
+export interface DualVerdict {
+  /** Security-only verdict: only actual security findings can trigger blocked. */
+  verdict: SkillVerdict;
+  /** Compliance verdict: all findings including legal/policy contribute. */
+  complianceVerdict: SkillVerdict;
+  /** Highest severity among security-only findings. */
+  securityMaxSeverity: ScanSeverity;
+}
+
+export function determineVerdict(result: Pick<SkillScanResult, 'maxSeverity' | 'findings'>): SkillVerdict {
+  return determineDualVerdict(result).verdict;
+}
+
+export function determineDualVerdict(result: Pick<SkillScanResult, 'maxSeverity' | 'findings'>): DualVerdict {
+  const findings = result.findings ?? [];
+  const securityFindings = findings.filter(isSecurityFinding);
+  const securityMaxSeverity = securityFindings.reduce<ScanSeverity>(
+    (currentMax, finding) => higherSeverity(currentMax, finding.severity),
+    'none',
+  );
+
+  // Security verdict: only security findings can block
+  let verdict: SkillVerdict;
+  if (securityMaxSeverity === 'high' || securityMaxSeverity === 'critical') {
+    verdict = 'blocked';
+  } else if (securityMaxSeverity === 'medium' || result.maxSeverity === 'high' || result.maxSeverity === 'critical') {
+    verdict = 'caution';
+  } else if (result.maxSeverity === 'medium') {
+    verdict = 'caution';
+  } else {
+    verdict = 'verified';
+  }
+
+  // Compliance verdict: all findings contribute (security + legal/policy)
+  let complianceVerdict: SkillVerdict;
   if (result.maxSeverity === 'high' || result.maxSeverity === 'critical') {
-    return 'blocked';
+    complianceVerdict = 'blocked';
+  } else if (result.maxSeverity === 'medium') {
+    complianceVerdict = 'caution';
+  } else {
+    complianceVerdict = 'verified';
   }
 
-  if (result.maxSeverity === 'medium') {
-    return 'caution';
-  }
-
-  return 'verified';
+  return { verdict, complianceVerdict, securityMaxSeverity };
 }
 
 export function buildScannerArgs(skillDir: string, outputFile: string, options: ScanOptions = {}) {
@@ -260,7 +320,8 @@ function buildScannerEnv() {
   return {
     ...process.env,
     SKILL_SCANNER_LLM_API_KEY: process.env.SKILL_SCANNER_LLM_API_KEY,
-    SKILL_SCANNER_LLM_MODEL: process.env.SKILL_SCANNER_LLM_MODEL ?? 'claude-sonnet-4-20250514',
+    SKILL_SCANNER_LLM_MODEL: process.env.SKILL_SCANNER_LLM_MODEL ?? 'openrouter/minimax/minimax-m2.5:free',
+    SKILL_SCANNER_LLM_BASE_URL: process.env.SKILL_SCANNER_LLM_BASE_URL ?? 'https://openrouter.ai/api/v1',
   };
 }
 

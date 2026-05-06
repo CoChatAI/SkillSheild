@@ -34,7 +34,13 @@ describe('publisher helpers', () => {
       version: '1.2.3',
       skillDir: '/tmp/trello',
       scanResult,
-      verdict: { verdict: 'caution', severity: 'medium', findingsCount: 1 },
+      verdict: {
+        verdict: 'caution',
+        severity: 'medium',
+        findingsCount: 1,
+        complianceVerdict: 'caution',
+        complianceSeverity: 'medium',
+      },
       scannedAt: '2026-03-21T00:00:00.000Z',
     });
 
@@ -91,7 +97,13 @@ describe('publishResults', () => {
         version: '1.2.3',
         skillDir: '/tmp/trello',
         scanResult,
-        verdict: { verdict: 'caution', severity: 'medium', findingsCount: 1 },
+        verdict: {
+          verdict: 'caution',
+          severity: 'medium',
+          findingsCount: 1,
+          complianceVerdict: 'caution',
+          complianceSeverity: 'medium',
+        },
         scannedAt: '2026-03-21T00:00:00.000Z',
         metadata: {
           name: 'Trello',
@@ -168,7 +180,13 @@ describe('publishResults', () => {
           ],
           findingsCount: 1,
         },
-        verdict: { verdict: 'blocked', severity: 'high', findingsCount: 1 },
+        verdict: {
+          verdict: 'blocked',
+          severity: 'high',
+          findingsCount: 1,
+          complianceVerdict: 'blocked',
+          complianceSeverity: 'high',
+        },
         scannedAt: '2026-03-21T01:00:00.000Z',
       },
       {
@@ -203,6 +221,8 @@ describe('buildD1Statements', () => {
       verdict: 'caution',
       severity: 'medium',
       findingsCount: 1,
+      complianceVerdict: 'blocked',
+      complianceSeverity: 'medium',
       r2Key: 'skills-sh/owner/repo/skill-name/latest.tar.gz',
       reportKey: 'skills-sh/owner/repo/skill-name.json',
       scanResult,
@@ -240,6 +260,8 @@ describe('buildD1Statements', () => {
       'skills-sh/owner/repo/skill-name/latest.tar.gz',
       'skills-sh/owner/repo/skill-name.json',
       '{"repo":"owner/repo"}',
+      'blocked',
+      'medium',
     ]);
     expect(statements[0].sql).toContain('installs_updated_at');
     expect(statements[0].sql).toContain('category');

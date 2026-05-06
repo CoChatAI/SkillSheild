@@ -4,4 +4,8 @@ resource "cloudflare_d1_database" "primary" {
 
   jurisdiction          = var.d1_jurisdiction
   primary_location_hint = var.d1_primary_location_hint
+
+  lifecycle {
+    ignore_changes = [read_replication]
+  }
 }

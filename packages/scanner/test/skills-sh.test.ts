@@ -14,22 +14,84 @@ describe('SkillsShAdapter', () => {
     vi.restoreAllMocks();
   });
 
-  it('parses skills from fixture-backed skills.sh pages', async () => {
+  it('discovers skills from 2-letter search prefix enumeration', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (!url.includes('/api/search?')) {
+        return jsonResponse({ skills: [] });
+      }
+
+      const query = new URL(url).searchParams.get('q');
+      if (query === 'aa') {
+        return jsonResponse({
+          skills: [
+            { source: 'anthropics/skills', skillId: 'frontend-design', name: 'frontend-design' },
+            { source: 'vercel-labs/agent-skills', skillId: 'vercel-react-best-practices', name: 'vercel-react-best-practices' },
+          ],
+        });
+      }
+
+      if (query === 'ab') {
+        return jsonResponse({
+          skills: [
+            { source: 'anthropics/skills', skillId: 'frontend-design', name: 'frontend-design' },
+            { source: 'openai/skills', skillId: 'prompt-reviewer', name: 'Prompt Reviewer' },
+          ],
+        });
+      }
+
+      return jsonResponse({ skills: [] });
+    });
+    const adapter = new SkillsShAdapter({
+      baseUrl: 'https://skills.example',
+      fetch: fetchMock as typeof fetch,
+      cloneRepository: vi.fn(),
+      sleep: vi.fn(async () => {}),
+    });
+
+    const result = await adapter.listAll();
+
+    expect(result).toEqual([
+      { slug: 'anthropics/skills/frontend-design', name: 'frontend-design' },
+      { slug: 'vercel-labs/agent-skills/vercel-react-best-practices', name: 'vercel-react-best-practices' },
+      { slug: 'openai/skills/prompt-reviewer', name: 'Prompt Reviewer' },
+    ]);
+    expect(fetchMock).toHaveBeenCalledWith('https://skills.example/api/search?q=aa&limit=100000', undefined);
+    expect(fetchMock).toHaveBeenCalledWith('https://skills.example/api/search?q=ab&limit=100000', undefined);
+  });
+
+  it('falls back to fixture-backed html pages when search and leaderboard discovery are empty', async () => {
     const homeHtml = await readFixture('home.html');
     const trendingHtml = `
       <a href="/anthropics/skills/frontend-design">Duplicate</a>
       <a href="/openai/skills/prompt-reviewer">Prompt Reviewer</a>
     `;
     const hotHtml = '<a href="/cochat/skills/incident-response">Incident Response</a>';
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(htmlResponse(homeHtml))
-      .mockResolvedValueOnce(htmlResponse(trendingHtml))
-      .mockResolvedValueOnce(htmlResponse(hotHtml));
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/api/search?')) {
+        return jsonResponse({ skills: [] });
+      }
+      if (url.includes('/api/skills/all-time/1')) {
+        return jsonResponse({ skills: [], hasMore: false, total: 0 });
+      }
+      if (url === 'https://skills.example') {
+        return htmlResponse(homeHtml);
+      }
+      if (url === 'https://skills.example/trending') {
+        return htmlResponse(trendingHtml);
+      }
+      if (url === 'https://skills.example/hot') {
+        return htmlResponse(hotHtml);
+      }
+
+      throw new Error(`Unexpected URL: ${url}`);
+    });
     const adapter = new SkillsShAdapter({
       baseUrl: 'https://skills.example',
       fetch: fetchMock as typeof fetch,
       cloneRepository: vi.fn(),
+      sleep: vi.fn(async () => {}),
     });
 
     const result = await adapter.listAll();
@@ -40,9 +102,91 @@ describe('SkillsShAdapter', () => {
       { slug: 'openai/skills/prompt-reviewer', name: 'prompt-reviewer' },
       { slug: 'cochat/skills/incident-response', name: 'incident-response' },
     ]);
-    expect(fetchMock).toHaveBeenNthCalledWith(1, 'https://skills.example');
-    expect(fetchMock).toHaveBeenNthCalledWith(2, 'https://skills.example/trending');
-    expect(fetchMock).toHaveBeenNthCalledWith(3, 'https://skills.example/hot');
+    expect(fetchMock).toHaveBeenCalledWith('https://skills.example/api/skills/all-time/1', undefined);
+    expect(fetchMock).toHaveBeenCalledWith('https://skills.example/api/search?q=aa&limit=100000', undefined);
+    const requestedUrls = fetchMock.mock.calls.map((call) => String(call[0]));
+    expect(requestedUrls).toContain('https://skills.example');
+    expect(requestedUrls).toContain('https://skills.example/trending');
+    expect(requestedUrls).toContain('https://skills.example/hot');
+  });
+
+  it('uses the leaderboard fast path and stops early when maxSkills is provided', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({
+        skills: [
+          { source: 'anthropics/skills', skillId: 'frontend-design', name: 'frontend-design' },
+          { source: 'vercel-labs/agent-skills', skillId: 'vercel-react-best-practices', name: 'vercel-react-best-practices' },
+          { source: 'openai/skills', skillId: 'prompt-reviewer', name: 'Prompt Reviewer' },
+        ],
+        total: 91611,
+        hasMore: true,
+      }));
+    const adapter = new SkillsShAdapter({
+      baseUrl: 'https://skills.example',
+      fetch: fetchMock as typeof fetch,
+      cloneRepository: vi.fn(),
+      sleep: vi.fn(async () => {}),
+    });
+
+    const result = await adapter.listAll(2);
+
+    expect(result).toEqual([
+      { slug: 'anthropics/skills/frontend-design', name: 'frontend-design' },
+      { slug: 'vercel-labs/agent-skills/vercel-react-best-practices', name: 'vercel-react-best-practices' },
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('honors Retry-After on 429 responses with a capped wait', async () => {
+    const sleep = vi.fn(async () => {});
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'rate_limit_exceeded' }), {
+        status: 429,
+        headers: { 'retry-after': '60', 'content-type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(jsonResponse({
+        skills: [
+          { source: 'anthropics/skills', skillId: 'frontend-design', name: 'frontend-design' },
+        ],
+        total: 91611,
+        hasMore: true,
+      }));
+
+    const adapter = new SkillsShAdapter({
+      baseUrl: 'https://skills.example',
+      fetch: fetchMock as typeof fetch,
+      cloneRepository: vi.fn(),
+      sleep,
+    });
+
+    const result = await adapter.listAll(1);
+
+    expect(result).toEqual([
+      { slug: 'anthropics/skills/frontend-design', name: 'frontend-design' },
+    ]);
+    expect(sleep).toHaveBeenCalledWith(60_000);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('resolves and caches GitHub repo HEAD SHAs for freshness', async () => {
+    const resolveRepositoryHead = vi.fn(async () => '0123456789abcdef0123456789abcdef01234567');
+    const adapter = new SkillsShAdapter({
+      fetch: vi.fn() as typeof fetch,
+      cloneRepository: vi.fn(),
+      resolveRepositoryHead,
+    });
+
+    await expect(adapter.resolveLatestVersion('anthropics/skills/frontend-design')).resolves.toBe(
+      '0123456789abcdef0123456789abcdef01234567',
+    );
+    await expect(adapter.resolveLatestVersion('anthropics/skills/other-skill')).resolves.toBe(
+      '0123456789abcdef0123456789abcdef01234567',
+    );
+
+    expect(resolveRepositoryHead).toHaveBeenCalledTimes(1);
+    expect(resolveRepositoryHead).toHaveBeenCalledWith('https://github.com/anthropics/skills.git');
   });
 
   it('passes the repo URL and requested ref into clone and returns the repo-root skill', async () => {
@@ -59,6 +203,21 @@ describe('SkillsShAdapter', () => {
       'refs/tags/v1.2.0',
     );
     await expect(readFile(join(skillDir, 'SKILL.md'), 'utf8')).resolves.toContain('Frontend Design');
+  });
+
+  it('treats latest as the repository default branch when cloning', async () => {
+    const cloneRepository = vi.fn(async (_repositoryUrl: string, destinationDir: string) => {
+      await writeFile(join(destinationDir, 'SKILL.md'), '# Frontend Design\n');
+    });
+    const adapter = new SkillsShAdapter({ cloneRepository, fetch: vi.fn() as typeof fetch });
+
+    await adapter.fetch('anthropics/skills/frontend-design', 'latest');
+
+    expect(cloneRepository).toHaveBeenCalledWith(
+      'https://github.com/anthropics/skills.git',
+      expect.any(String),
+      undefined,
+    );
   });
 
   it('prefers skills/<name> when the repo contains multiple skill locations', async () => {
@@ -147,5 +306,12 @@ function htmlResponse(body: string) {
   return new Response(body, {
     status: 200,
     headers: { 'content-type': 'text/html; charset=utf-8' },
+  });
+}
+
+function jsonResponse(body: unknown) {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { 'content-type': 'application/json; charset=utf-8' },
   });
 }

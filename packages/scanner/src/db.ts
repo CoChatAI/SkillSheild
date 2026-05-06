@@ -20,6 +20,8 @@ export interface PublishDatabasePayload {
   verdict: SkillVerdict;
   severity: ScanSeverity;
   findingsCount: number;
+  complianceVerdict: SkillVerdict;
+  complianceSeverity: ScanSeverity;
   r2Key: string | null;
   reportKey: string;
   scanResult: SkillScanResult;
@@ -64,8 +66,8 @@ export function buildD1Statements(payload: PublishDatabasePayload): D1Statement[
         'INSERT INTO skills (',
         '  id, source, slug, name, description, author, latest_version, latest_scanned_version,',
         '  verdict, scan_severity, findings_count, installs, installs_updated_at, category,',
-        '  first_seen_at, last_scanned_at, last_updated_at, r2_key, report_r2_key, metadata',
-        ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        '  first_seen_at, last_scanned_at, last_updated_at, r2_key, report_r2_key, metadata, compliance_verdict, compliance_severity',
+        ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         'ON CONFLICT(id) DO UPDATE SET',
         '  name = excluded.name,',
         // Preserve a previously-written description on a re-scan that fails
@@ -88,7 +90,9 @@ export function buildD1Statements(payload: PublishDatabasePayload): D1Statement[
         '  last_updated_at = excluded.last_updated_at,',
         '  r2_key = excluded.r2_key,',
         '  report_r2_key = excluded.report_r2_key,',
-        '  metadata = excluded.metadata',
+        '  metadata = excluded.metadata,',
+        '  compliance_verdict = excluded.compliance_verdict,',
+        '  compliance_severity = excluded.compliance_severity',
       ].join(' '),
       params: [
         skillId,
@@ -111,6 +115,8 @@ export function buildD1Statements(payload: PublishDatabasePayload): D1Statement[
         payload.r2Key,
         payload.reportKey,
         serializedMetadata,
+        payload.complianceVerdict,
+        payload.complianceSeverity,
       ],
     },
     {

@@ -6,6 +6,8 @@ export type WorkerBindings = {
   SCAN_QUEUE: Queue;
   SCANNER_BASE_URL: string;
   SCANNER_REQUEST_TIMEOUT_MS?: string;
+  SCAN_QUEUE_MAX_ATTEMPTS?: string;
+  DISABLED_SOURCES?: string;
   SCANNER_AUTH_TOKEN?: string;
   WEBHOOK_SECRET?: string;
   ENVIRONMENT?: string;

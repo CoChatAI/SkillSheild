@@ -10,12 +10,7 @@ output "worker_name" {
 
 output "worker_route" {
   description = "Cloudflare Worker route pattern."
-  value       = cloudflare_workers_route.worker.pattern
-}
-
-output "worker_route_id" {
-  description = "Cloudflare Worker route identifier."
-  value       = cloudflare_workers_route.worker.id
+  value       = var.worker_route
 }
 
 output "worker_hostname" {

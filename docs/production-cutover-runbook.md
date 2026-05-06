@@ -1,151 +1,206 @@
 # Production Cutover Runbook
 
-## Purpose
+Follow these steps in order. Each step tells you exactly what to do, what value you need, and where to get it.
 
-Use this runbook once the pre-secret implementation work is complete.
+Do not skip ahead. Later steps depend on outputs from earlier steps.
 
-This document assumes the repo is already in the state described by:
+## Prerequisites
 
-- `.opencode/plans/skillshield-pre-secret-deploy-readiness-20260330-121500/outputs/final-readiness.md`
+### Accounts you need
 
-At the start of this runbook, the only work left should be:
+Sign into all of these before starting:
 
-- applying real secrets and account-specific IDs
-- deploying the scanner and Worker
-- applying the D1 schema
-- running bounded and full scrapes
-- registering upstream webhooks
+1. **GitHub** at `https://github.com`
+   - you need admin access to `CoChatAI/SkillSheild`
+2. **Cloudflare** at `https://dash.cloudflare.com`
+   - you need access to the account that owns the `cochat.ai` zone
+3. **Fly.io** at `https://fly.io`
+   - you need an account that can create and deploy apps
 
-## Definition Of Done
+### Tools you need installed locally
 
-Cutover is complete only when all of the following are true:
+- `gh` (GitHub CLI)
+- `terraform`
+- `flyctl`
+- Docker
+- Node.js 22+
 
-1. Terraform has created the production Cloudflare resources.
-2. Fly has the scanner deployed and returning `200` from `/health`.
-3. Cloudflare has the Worker deployed on the production route.
-4. `packages/worker/schema.sql` has been applied to the production D1 database.
-5. One bounded scrape has succeeded.
-6. Full scrapes for the intended launch sources have succeeded.
-7. ClawHub and GitHub webhook test deliveries both complete end to end.
+This repo uses `npx pnpm@10.6.3 ...` so a global pnpm install is not required.
 
-## Required Inputs
+### Cloudflare API tokens you need to create first
 
-### Cloudflare IDs and deploy credentials
+Create these **before** starting the steps below. You will use them throughout.
 
-- `CLOUDFLARE_API_TOKEN`
-- `CLOUDFLARE_ACCOUNT_ID`
-- `cloudflare_zone_id` for Terraform
-- production D1 database ID from Terraform output
-- production DNS target for `worker_dns_target` in Terraform
+Go to: `Cloudflare -> My Profile -> API Tokens -> Create Token -> Custom Token`
 
-### Worker runtime secrets
+**Token 1: Worker deploy token**
 
-- `WEBHOOK_SECRET`
-- `SCANNER_AUTH_TOKEN`
+Permissions:
+- `Account -> Workers Scripts -> Edit`
+- `Account -> D1 -> Edit`
+- `Account -> Queues -> Edit`
+- `Account -> Workers R2 Storage -> Edit`
+- `Zone -> Workers Routes -> Edit`
 
-### Worker production vars and bindings
+Resources:
+- `Account Resources -> Include -> your account`
+- `Zone Resources -> Include -> your account`
 
-- `SCANNER_BASE_URL`
-- `SCANNER_REQUEST_TIMEOUT_MS` if overriding the default
-- production D1 database ID in `packages/worker/wrangler.toml` under `[env.production]`
+**Token 2: Terraform infra token**
 
-### Fly deploy credential
+Permissions:
+- `Account -> D1 -> Edit`
+- `Account -> Queues -> Edit`
+- `Account -> Workers R2 Storage -> Edit`
+- `Zone -> Workers Routes -> Edit`
+- `Zone -> DNS -> Edit`
 
-- `FLY_API_TOKEN`
+Resources:
+- `Account Resources -> Include -> your account`
+- `Zone Resources -> Include -> your account`
 
-### Scanner runtime secrets
+**Token 3: Scanner runtime token**
 
-- `SCANNER_AUTH_TOKEN`
-- `CF_ACCOUNT_ID`
-- `CF_API_TOKEN`
-- `D1_DATABASE_ID`
-- `R2_ENDPOINT`
-- `R2_ACCESS_KEY_ID`
-- `R2_SECRET_ACCESS_KEY`
+Permissions:
+- `Account -> D1 -> Edit`
 
-### Optional scanner runtime secrets
+Resources:
+- `Account Resources -> Include -> your account`
 
-- `R2_SESSION_TOKEN`
-- `R2_SKILLS_BUCKET`
-- `R2_REPORTS_BUCKET`
-- `SKILL_SCANNER_LLM_API_KEY`
-- `SKILL_SCANNER_LLM_MODEL`
-- `VIRUSTOTAL_API_KEY`
+### R2 S3-compatible credentials you need to create first
 
-### GitHub Actions runtime wiring
+1. Go to: `Cloudflare -> Storage & databases -> R2 -> Overview`
+2. In the right sidebar, find the **Account Details** section
+3. Next to **API Tokens**, click **Manage**
+4. Create a token with **Admin Read & Write** permissions
+5. Copy these values immediately:
+   - Access Key ID
+   - Secret Access Key
 
-- repo or environment secret `CLOUDFLARE_API_TOKEN`
-- repo or environment secret `CLOUDFLARE_ACCOUNT_ID`
-- repo or environment secret `FLY_API_TOKEN`
-- repo or environment secret `SCANNER_AUTH_TOKEN`
-- repo or environment variable `SCANNER_BASE_URL`
+The secret is shown once. Save it in your password manager immediately.
 
-## Preflight
+Your R2 endpoint is:
 
-Run these checks before touching production credentials.
-
-1. Confirm the final readiness doc still says only cutover items remain.
-2. Confirm the production files are the intended ones:
-   - `packages/worker/wrangler.toml`
-   - `packages/scanner/fly.toml`
-   - `.github/workflows/deploy-worker.yml`
-   - `.github/workflows/deploy-scanner.yml`
-   - `.github/workflows/full-scrape.yml`
-   - `infrastructure/terraform/*`
-3. Confirm the scanner image still builds locally:
-
-```bash
-docker build -f packages/scanner/Dockerfile -t skillshield-scanner-cutover .
+```text
+https://YOUR_CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com
 ```
 
-4. Confirm Terraform still validates:
+### Secrets you need to generate yourself
+
+Generate two random secrets. Save them in a password manager.
 
 ```bash
-terraform -chdir=infrastructure/terraform init -backend=false
-terraform -chdir=infrastructure/terraform validate
+openssl rand -hex 32
 ```
 
-## Step 1: Apply Cloudflare Infrastructure
+Run that twice. Use the outputs as:
+- `WEBHOOK_SECRET` (used by Worker and webhook providers)
+- `SCANNER_AUTH_TOKEN` (shared between Worker, scanner, and GitHub Actions)
 
-Run Terraform first so all account-specific IDs come from a real source of truth.
+### Cloudflare IDs you need to look up
 
-1. Prepare production tfvars or environment variables for:
-   - `cloudflare_account_id`
-   - `cloudflare_zone_id`
-   - `worker_dns_target`
-2. Review the planned changes:
+- **Account ID**: visible on the Cloudflare dashboard home or right sidebar on account-level pages
+- **Zone ID**: `Websites -> cochat.ai -> Overview`, right sidebar or API section
+- **Workers subdomain**: `Workers & Pages -> Overview`, your `*.workers.dev` subdomain
+
+### Fly deploy token you need to create
+
+Go to: `https://fly.io` -> account settings -> access tokens
+
+Create a deploy token and copy it.
+
+---
+
+## Step 1: Create the Fly app
+
+The Fly app must exist before you can set secrets or deploy.
 
 ```bash
+flyctl auth login
+flyctl apps create skillshield-scanner
+```
+
+If `skillshield-scanner` is taken globally, use a different name and update:
+- `packages/scanner/fly.toml` (`app = "..."`)
+- `packages/worker/wrangler.toml` (`SCANNER_BASE_URL` in `[env.production.vars]`)
+- GitHub repo variable `SCANNER_BASE_URL`
+
+Verify it exists:
+
+```bash
+flyctl status --app skillshield-scanner
+```
+
+## Step 2: Create the Terraform inputs file
+
+```bash
+cp infrastructure/terraform/production.auto.tfvars.example infrastructure/terraform/production.auto.tfvars
+```
+
+Edit `infrastructure/terraform/production.auto.tfvars`:
+
+```hcl
+cloudflare_account_id = "YOUR_CLOUDFLARE_ACCOUNT_ID"
+cloudflare_zone_id    = "YOUR_CLOUDFLARE_ZONE_ID"
+worker_dns_target     = "skillshield-worker.YOUR_WORKERS_SUBDOMAIN.workers.dev"
+```
+
+Where to get them:
+- `cloudflare_account_id`: Cloudflare dashboard
+- `cloudflare_zone_id`: `Websites -> cochat.ai -> Overview`
+- `worker_dns_target`: `Workers & Pages -> Overview`, format: `skillshield-worker.SUBDOMAIN.workers.dev`
+
+## Step 3: Apply Terraform
+
+Use your **Terraform infra token** for this step.
+
+```bash
+export CLOUDFLARE_API_TOKEN="YOUR_TERRAFORM_TOKEN"
+```
+
+```bash
+terraform -chdir=infrastructure/terraform init
 terraform -chdir=infrastructure/terraform plan
-```
-
-3. Apply the stack:
-
-```bash
 terraform -chdir=infrastructure/terraform apply
 ```
 
-4. Record these outputs immediately:
+Capture the outputs:
 
 ```bash
 terraform -chdir=infrastructure/terraform output
 ```
 
-You will need at least:
+Save at least:
+- `d1_database_id` (you need this for Fly secrets and `wrangler.toml`)
 
-- `d1_database_id`
-- `worker_route`
-- `worker_hostname`
-- `skills_bucket_name`
-- `reports_bucket_name`
-- `meta_bucket_name`
-- `scan_queue_name`
+## Step 4: Update `wrangler.toml` with the real D1 database ID
 
-## Step 2: Wire Fly Scanner Secrets
+Edit `packages/worker/wrangler.toml`.
 
-Set all scanner runtime secrets before attempting deploy.
+Find:
 
-Example:
+```toml
+database_id = "terraform-output-placeholder"
+```
+
+Replace with the real `d1_database_id` from the Terraform output.
+
+Also confirm that `SCANNER_BASE_URL` matches your Fly app:
+
+```toml
+SCANNER_BASE_URL = "https://skillshield-scanner.fly.dev"
+```
+
+## Step 5: Set Fly scanner runtime secrets
+
+Use the values you prepared:
+- `SCANNER_AUTH_TOKEN`: the random token you generated
+- `CF_API_TOKEN`: your **scanner runtime Cloudflare token** (Token 3)
+- `CF_ACCOUNT_ID`: your Cloudflare account ID
+- `D1_DATABASE_ID`: from Terraform output
+- `R2_ENDPOINT`: `https://YOUR_CLOUDFLARE_ACCOUNT_ID.r2.cloudflarestorage.com`
+- `R2_ACCESS_KEY_ID`: from R2 API credentials
+- `R2_SECRET_ACCESS_KEY`: from R2 API credentials
 
 ```bash
 flyctl secrets set \
@@ -159,42 +214,47 @@ flyctl secrets set \
   --app skillshield-scanner
 ```
 
-If used, also set:
+Optional:
 
 ```bash
 flyctl secrets set \
-  R2_SESSION_TOKEN="..." \
   R2_SKILLS_BUCKET="skillshield-skills" \
   R2_REPORTS_BUCKET="skillshield-reports" \
   SKILL_SCANNER_LLM_API_KEY="..." \
-  SKILL_SCANNER_LLM_MODEL="..." \
+  SKILL_SCANNER_LLM_MODEL="claude-sonnet-4-20250514" \
   VIRUSTOTAL_API_KEY="..." \
   --app skillshield-scanner
 ```
 
-## Step 3: Deploy The Scanner First
-
-You want the private execution backend healthy before the Worker starts forwarding queue jobs to it.
-
-### Option A: GitHub Actions
-
-Run `Deploy Scanner` with `deploy=true`.
-
-### Option B: Local CLI
+## Step 6: Deploy the scanner
 
 ```bash
-flyctl auth login
-flyctl config validate -c packages/scanner/fly.toml
 flyctl deploy --config packages/scanner/fly.toml --remote-only
 ```
 
-### Verify Scanner Health
+The scanner is intentionally scaled horizontally for queue-backed ingestion. Keep scanner-local concurrency at 1 and add Fly machines before increasing per-process work.
+
+Current production target from `packages/scanner/fly.toml`:
+- `min_machines_running = 2`
+- `memory = "1024mb"`
+
+Useful scaling commands:
+
+```bash
+flyctl scale count 2 --app skillshield-scanner
+flyctl scale memory 1024 --app skillshield-scanner
+flyctl status --app skillshield-scanner
+```
+
+If Fly reports an org machine-limit error, do not compensate by raising scanner-local concurrency. Resolve the Fly capacity limit first, then re-run the scale command.
+
+Verify:
 
 ```bash
 curl -fsS https://skillshield-scanner.fly.dev/health
 ```
 
-Expected response:
+Expected:
 
 ```json
 {"status":"ok","service":"skillshield-scanner"}
@@ -202,20 +262,14 @@ Expected response:
 
 Do not continue until this works.
 
-## Step 4: Wire Worker Production Config And Secrets
+## Step 7: Set Worker runtime secrets
 
-The Worker needs both secret values and one real account-specific binding update.
+Use your **Worker deploy token** for this step and all remaining Wrangler commands.
 
-1. Update `packages/worker/wrangler.toml` production D1 placeholder:
-
-- replace `database_id = "terraform-output-placeholder"`
-- with the real `d1_database_id` from Terraform output
-
-2. Confirm the production scanner base URL is correct in `packages/worker/wrangler.toml`:
-
-- `SCANNER_BASE_URL = "https://skillshield-scanner.fly.dev"`
-
-3. Add Worker secrets:
+```bash
+export CLOUDFLARE_API_TOKEN="YOUR_WORKER_DEPLOY_TOKEN"
+export CLOUDFLARE_ACCOUNT_ID="YOUR_CLOUDFLARE_ACCOUNT_ID"
+```
 
 ```bash
 cd packages/worker
@@ -223,138 +277,171 @@ npx pnpm@10.6.3 exec wrangler secret put WEBHOOK_SECRET --env production
 npx pnpm@10.6.3 exec wrangler secret put SCANNER_AUTH_TOKEN --env production
 ```
 
-4. Make sure the same values are present in GitHub Actions if you intend to deploy via workflow.
+Use the same `SCANNER_AUTH_TOKEN` value you put into Fly in Step 5.
+Use the `WEBHOOK_SECRET` you generated earlier.
 
-## Step 5: Apply The D1 Schema
+## Step 8: Apply the D1 schema
 
-Run this after infrastructure exists and before relying on any production writes.
-
-Example:
+Still in `packages/worker`, still using the Worker deploy token:
 
 ```bash
-cd packages/worker
 npx pnpm@10.6.3 exec wrangler d1 execute skillshield-db --env production --file schema.sql
 ```
 
-If your Wrangler version or account setup prefers database ID targeting, use the equivalent production-safe `wrangler d1 execute` form for that environment.
+## Step 9: Deploy the Worker
 
-## Step 6: Deploy The Worker
-
-### Option A: GitHub Actions
-
-Run `Deploy Worker` with `deploy=true`.
-
-### Option B: Local CLI
+Still in `packages/worker`:
 
 ```bash
-cd packages/worker
 npx pnpm@10.6.3 exec wrangler deploy --env production --config wrangler.toml
 ```
 
-### Verify Worker Health
+Verify:
 
 ```bash
 curl -fsS https://skillshield.cochat.ai/health
 ```
 
-Expected response:
+Expected:
 
 ```json
 {"status":"ok","service":"skillshield"}
 ```
 
-## Step 7: Smoke-Test The Queue To Scanner Seam
+## Step 10: Set GitHub secrets for CI/CD
 
-Do this before any full scrape or live webhook registration.
-
-1. Trigger one scanner request directly to confirm auth and publishing work.
-2. Then trigger one queue-backed scan path through the Worker if you have a safe test event source available.
-
-At minimum, verify:
-
-- scanner returns `401` without the token when auth is configured
-- scanner returns `200` with the token
-- a successful scan writes D1 rows
-- a successful scan uploads a report to R2
-- the Worker can read the resulting public artifact path
-
-Suggested public read checks after one successful scan:
+These are only needed if you want to deploy and run scrapes from GitHub Actions.
 
 ```bash
-curl -fsS https://skillshield.cochat.ai/api/v1/stats
-curl -fsS https://skillshield.cochat.ai/api/v1/recent
-curl -fsS https://skillshield.cochat.ai/
+gh secret set CLOUDFLARE_API_TOKEN --repo CoChatAI/SkillSheild --env production
+gh secret set CLOUDFLARE_ACCOUNT_ID --repo CoChatAI/SkillSheild --env production
+gh secret set FLY_API_TOKEN --repo CoChatAI/SkillSheild --env production
+gh secret set SCANNER_AUTH_TOKEN --repo CoChatAI/SkillSheild --env production
 ```
 
-## Step 8: Run A Bounded Scrape First
+Use:
+- `CLOUDFLARE_API_TOKEN`: your **Worker deploy token** (Token 1)
+- `CLOUDFLARE_ACCOUNT_ID`: your Cloudflare account ID
+- `FLY_API_TOKEN`: your Fly deploy token
+- `SCANNER_AUTH_TOKEN`: the same random token used in Fly and Worker
 
-Do not start with a full backfill.
+Confirm the repo variable is set:
 
-### Option A: GitHub Actions
+```bash
+gh variable list --repo CoChatAI/SkillSheild
+```
 
-Run `Full Scrape` with:
+You want `SCANNER_BASE_URL=https://skillshield-scanner.fly.dev`.
 
-- `execute=true`
-- `source=clawhub` or `skills-sh`
-- `wait=true`
-- a small `limit` such as `3` or `5`
+If missing:
 
-### Option B: Direct scanner call
+```bash
+gh variable set SCANNER_BASE_URL --repo CoChatAI/SkillSheild --body "https://skillshield-scanner.fly.dev"
+```
+
+## Step 11: Run a bounded scrape
+
+Do not start with a full backfill. Test with a small limit first.
 
 ```bash
 curl --fail-with-body --show-error --silent \
   -X POST \
-  -H "Authorization: Bearer $SCANNER_AUTH_TOKEN" \
+  -H "Authorization: Bearer YOUR_SCANNER_AUTH_TOKEN" \
   "https://skillshield-scanner.fly.dev/scrape/clawhub?wait=true&limit=5"
 ```
 
-Repeat for `skills-sh` once the first source succeeds.
+Then:
 
-### Success criteria
+```bash
+curl --fail-with-body --show-error --silent \
+  -X POST \
+  -H "Authorization: Bearer YOUR_SCANNER_AUTH_TOKEN" \
+  "https://skillshield-scanner.fly.dev/scrape/skills-sh?wait=true&limit=5"
+```
 
-- scrape returns completed counters
-- D1 row counts increase
-- R2 report objects exist
-- Worker public routes can read the new data
+Verify data landed:
 
-## Step 9: Run Full Scrapes
+```bash
+curl -fsS https://skillshield.cochat.ai/api/v1/stats
+curl -fsS https://skillshield.cochat.ai/api/v1/recent
+```
 
-Once bounded scrapes are green, run the real source backfills.
+## Step 12: Run full scrapes
 
-Recommended order:
+After bounded scrapes pass, run real backfills. Full scrapes should enqueue jobs and return quickly; they should not keep GitHub Actions waiting for every skill scan to finish.
 
+Order:
 1. `clawhub`
 2. `skills-sh`
 
-If using the workflow, keep `wait=true` for the first full production runs so the output stays explicit.
+Use GitHub Actions `Full Scrape` workflow:
+- `execute=true`
+- `wait=false`
+- no `limit`
 
-## Step 10: Register Upstream Webhooks Last
+The workflow builds a `POST /scrape/:source?wait=false` request. A successful full scrape returns `202` with a `runId`, discovered count, and queued count. The Cloudflare Queue consumer then dispatches individual `/scan` calls to the Fly scanner with `SCANNER_AUTH_TOKEN`.
 
-This is the first irreversible external traffic step.
+Or call the scanner directly without the `limit` parameter:
+
+```bash
+curl --fail-with-body --show-error --silent \
+  -X POST \
+  -H "Authorization: Bearer YOUR_SCANNER_AUTH_TOKEN" \
+  "https://skillshield-scanner.fly.dev/scrape/clawhub?wait=false"
+```
+
+Only use `wait=true` for bounded smoke tests such as `limit=5`.
+
+### Monitor queue-backed scrape status
+
+Use the Worker status endpoint with the same `SCANNER_AUTH_TOKEN` used by the scanner and GitHub Actions:
+
+```bash
+curl --fail-with-body --show-error --silent \
+  -H "Authorization: Bearer YOUR_SCANNER_AUTH_TOKEN" \
+  "https://skillshield.cochat.ai/api/v1/scrape-runs?limit=10"
+```
+
+Drill into a specific run's jobs:
+
+```bash
+curl --fail-with-body --show-error --silent \
+  -H "Authorization: Bearer YOUR_SCANNER_AUTH_TOKEN" \
+  "https://skillshield.cochat.ai/api/v1/scrape-runs/RUN_ID/jobs?limit=100"
+```
+
+Interpretation:
+- `queued_jobs` includes both queued and retrying jobs.
+- `running_jobs` are jobs currently being dispatched to the scanner.
+- `completed_jobs` and `failed_jobs` are terminal job counts.
+- A run becomes `completed` when no queued, running, or retrying jobs remain and no jobs failed.
+- A run becomes `failed` when no active jobs remain and at least one job failed.
+
+Dashboard exposure for scrape runs is a follow-up. The authenticated API above is the production operator surface for this rollout.
+
+## Step 13: Register upstream webhooks
+
+Only do this after all of the above works.
 
 ### ClawHub
 
 - Endpoint: `https://skillshield.cochat.ai/webhooks/clawhub`
-- Secret: `WEBHOOK_SECRET`
+- Secret: your `WEBHOOK_SECRET`
 
 ### GitHub
 
+- Where: `Repository -> Settings -> Webhooks` for each skills.sh-backed repo
 - Endpoint: `https://skillshield.cochat.ai/webhooks/github`
-- Secret: `WEBHOOK_SECRET`
-- Events:
-  - `push`
-  - `release`
+- Secret: your `WEBHOOK_SECRET`
+- Events: `push` and `release`
 
 After registration, send one test delivery from each provider and verify:
-
 - Worker returns the expected response
 - `webhook_events` row is written
 - queue forwarding occurs
 - scanner executes the resulting job
 
-## Step 11: Post-Cutover Checks
-
-Run these checks after webhooks are live.
+## Step 14: Final smoke checks
 
 ```bash
 curl -fsS https://skillshield.cochat.ai/health
@@ -364,45 +451,20 @@ curl -fsS "https://skillshield.cochat.ai/api/search?q=design&limit=10"
 curl -fsS https://skillshield.cochat.ai/
 ```
 
-Also verify one real skill path from each source:
-
-- one ClawHub metadata or download path under `/clawhub/api/v1/*`
-- one skills.sh metadata or download path under `/skills/*`
+Also verify:
+- one ClawHub route works under `/clawhub/api/v1/*`
+- one skills.sh route works under `/skills/*`
 
 ## Rollback
 
 If something fails, stop at the earliest safe boundary.
 
-### Scanner deploy fails
+- **Scanner deploy fails**: do not deploy the Worker. Fix scanner first.
+- **Worker deploy fails**: do not register webhooks. Fix Worker first.
+- **D1 schema fails**: do not run scrapes. Fix schema targeting first.
+- **Bounded scrape fails**: do not run full scrapes. Check scanner logs and credentials.
+- **Webhook test fails**: remove the webhook registration immediately. Check Worker logs, queue, and scanner auth.
 
-- do not deploy the Worker
-- inspect Fly logs
-- fix scanner runtime or secrets first
+## Done
 
-### Worker deploy fails
-
-- do not register webhooks
-- keep scanner isolated
-- fix Worker config or secrets first
-
-### D1 schema apply fails
-
-- do not run scrapes
-- correct schema/apply targeting first
-
-### Bounded scrape fails
-
-- do not run full scrapes
-- do not register webhooks
-- inspect scanner logs and D1/R2 credentials first
-
-### Webhook test delivery fails
-
-- disable or remove webhook configuration immediately
-- inspect Worker logs, queue behavior, and scanner auth
-
-## Operator Notes
-
-- `flyctl config validate` is expected to require Fly auth. Use it during live cutover, not as a local anonymous check.
-- On this machine, plain `pnpm` may still be blocked by Corepack signature verification. If that recurs locally, use the already-documented direct local binaries or run the GitHub workflows instead.
-- Keep webhook registration last. That ordering is the main protection against accepting live upstream events before the queue and scanner path is proven.
+If all 14 steps pass, SkillShield is live.
