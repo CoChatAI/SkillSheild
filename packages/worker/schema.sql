@@ -11,6 +11,8 @@ CREATE TABLE skills (
   scan_severity TEXT,
   findings_count INTEGER DEFAULT 0,
   installs INTEGER DEFAULT 0,
+  installs_updated_at TEXT,
+  category TEXT,
   first_seen_at TEXT NOT NULL,
   last_scanned_at TEXT,
   last_updated_at TEXT NOT NULL,
@@ -24,6 +26,8 @@ CREATE INDEX idx_skills_source ON skills(source);
 CREATE INDEX idx_skills_verdict ON skills(verdict);
 CREATE INDEX idx_skills_source_verdict ON skills(source, verdict);
 CREATE INDEX idx_skills_last_updated ON skills(last_updated_at);
+CREATE INDEX idx_skills_installs ON skills(installs DESC);
+CREATE INDEX idx_skills_category ON skills(category);
 
 CREATE TABLE scan_runs (
   id TEXT PRIMARY KEY,

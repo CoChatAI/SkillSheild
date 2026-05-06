@@ -232,6 +232,8 @@ describe('buildD1Statements', () => {
       'medium',
       1,
       42,
+      null,
+      null,
       '2026-03-21T00:00:00.000Z',
       '2026-03-21T00:00:00.000Z',
       '2026-03-21T00:00:00.000Z',
@@ -239,6 +241,8 @@ describe('buildD1Statements', () => {
       'skills-sh/owner/repo/skill-name.json',
       '{"repo":"owner/repo"}',
     ]);
+    expect(statements[0].sql).toContain('installs_updated_at');
+    expect(statements[0].sql).toContain('category');
     expect(statements[1].sql).toContain('INSERT INTO scan_runs');
     expect(statements[1].params).toEqual([
       'skills-sh:owner/repo/skill-name:main',
@@ -255,5 +259,30 @@ describe('buildD1Statements', () => {
       '["static","llm"]',
       null,
     ]);
+  });
+
+  it('forwards category and installsUpdatedAt to the skills upsert', () => {
+    const statements = buildD1Statements({
+      source: 'skills-sh',
+      slug: 'owner/repo/seo-audit',
+      version: 'main',
+      verdict: 'verified',
+      severity: 'low',
+      findingsCount: 0,
+      r2Key: 'skills-sh/owner/repo/seo-audit/latest.tar.gz',
+      reportKey: 'skills-sh/owner/repo/seo-audit.json',
+      scanResult,
+      scannedAt: '2026-05-05T00:00:00.000Z',
+      metadata: {
+        name: 'SEO Audit',
+        installs: 1234,
+        installsUpdatedAt: '2026-05-04T12:00:00.000Z',
+        category: 'Marketing & Growth',
+      },
+    });
+
+    expect(statements[0].params).toContain(1234);
+    expect(statements[0].params).toContain('2026-05-04T12:00:00.000Z');
+    expect(statements[0].params).toContain('Marketing & Growth');
   });
 });

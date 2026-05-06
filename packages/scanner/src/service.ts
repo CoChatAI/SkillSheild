@@ -5,6 +5,8 @@ import { determineVerdict, scanSkill } from './scanner';
 import { publishResults, type PublishVerdict } from './publisher';
 import { ClawHubAdapter } from './adapters/clawhub';
 import { SkillsShAdapter } from './adapters/skills-sh';
+import { resolveSkillCategory } from './category';
+import type { SkillRecordMetadata } from './db';
 
 export interface ScannerSkillListItem {
   slug: string;
@@ -91,6 +93,7 @@ export async function executeScanJob(
     skillDir = await adapter.fetch(slug, job.version);
     const scanResult = await scanSkillImpl(skillDir, buildScanOptions());
     const verdict = buildPublishVerdict(scanResult.maxSeverity, scanResult.findingsCount);
+    const categoryResult = await resolveSkillCategory({ skillDir, fallback: slug });
 
     await publishResultsImpl({
       source,
@@ -99,9 +102,15 @@ export async function executeScanJob(
       skillDir,
       scanResult,
       verdict,
+      metadata: {
+        category: categoryResult.category,
+      },
     });
 
-    logger.log(`[scan] Complete: ${source}/${slug} -> ${verdict.verdict}`);
+    logger.log(
+      `[scan] Complete: ${source}/${slug} -> ${verdict.verdict}`
+        + (categoryResult.category ? ` (category=${categoryResult.category}, source=${categoryResult.source})` : ''),
+    );
 
     return {
       source,
@@ -153,6 +162,12 @@ export async function runFullSourceScrape(
 
       const scanResult = await scanSkillImpl(skillDir, scanOptions);
       const verdict = buildPublishVerdict(scanResult.maxSeverity, scanResult.findingsCount);
+      const categoryResult = await resolveSkillCategory({ skillDir, fallback: skill.slug });
+      const baseMetadata = buildMetadata(skill);
+      const metadata: SkillRecordMetadata = {
+        ...baseMetadata,
+        category: categoryResult.category,
+      };
 
       await publishResultsImpl({
         source,
@@ -161,12 +176,15 @@ export async function runFullSourceScrape(
         skillDir,
         scanResult,
         verdict,
-        metadata: buildMetadata(skill),
+        metadata,
       });
 
       verdicts[verdict.verdict] += 1;
       completed += 1;
-      logger.log(`[scrape] Complete: ${source}/${skill.slug} -> ${verdict.verdict}`);
+      logger.log(
+        `[scrape] Complete: ${source}/${skill.slug} -> ${verdict.verdict}`
+          + (categoryResult.category ? ` (category=${categoryResult.category}, source=${categoryResult.source})` : ''),
+      );
     } catch (error) {
       failed += 1;
       logger.error(`[scrape] Failed: ${skill.slug}`, error);

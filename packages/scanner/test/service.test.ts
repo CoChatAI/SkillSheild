@@ -110,10 +110,10 @@ describe('scanner service orchestration', () => {
     expect(publishResults).toHaveBeenCalledWith(expect.objectContaining({
       slug: 'team/trello',
       version: '1.2.3',
-      metadata: {
+      metadata: expect.objectContaining({
         name: 'Trello',
         latestVersion: '1.2.3',
-      },
+      }),
       verdict: {
         verdict: 'caution',
         severity: 'medium',
@@ -380,13 +380,13 @@ describe('scanner service routes', () => {
       source: 'skills-sh',
       slug: 'anthropics/skills/frontend-design',
       version: 'latest',
-      metadata: {
+      metadata: expect.objectContaining({
         name: 'frontend-design',
         latestVersion: 'latest',
         metadata: {
           repo: 'anthropics/skills',
         },
-      },
+      }),
     }));
   });
 });

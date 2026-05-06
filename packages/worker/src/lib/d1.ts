@@ -7,12 +7,14 @@ export type SkillRow = {
   name: string;
   description: string | null;
   author: string | null;
+  category: string | null;
   latest_version: string | null;
   latest_scanned_version: string | null;
   verdict: string;
   scan_severity: string | null;
   findings_count: number | null;
   installs: number | null;
+  installs_updated_at: string | null;
   first_seen_at: string | null;
   last_scanned_at: string | null;
   last_updated_at: string | null;
@@ -33,9 +35,26 @@ export type SkillListQuery = {
   query?: string;
 };
 
+export type SkillSearchSort = 'installs:desc' | 'recent' | 'name:asc';
+
+const SUPPORTED_SORTS: readonly SkillSearchSort[] = ['installs:desc', 'recent', 'name:asc'];
+
+export function parseSkillSearchSort(value: string | undefined | null): SkillSearchSort {
+  if (!value) {
+    return 'installs:desc';
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return (SUPPORTED_SORTS as readonly string[]).includes(normalized)
+    ? (normalized as SkillSearchSort)
+    : 'installs:desc';
+}
+
 export type UnifiedSearchQuery = SkillListQuery & {
   source?: string;
   verdict?: string;
+  category?: string;
+  sort?: SkillSearchSort;
 };
 
 export function getDatabaseHealthLabel(): string {
@@ -137,11 +156,28 @@ export async function searchSkills(db: D1Database, input: UnifiedSearchQuery) {
     params.push(input.verdict);
   }
 
-  sql += ' ORDER BY installs DESC, last_updated_at DESC LIMIT ? OFFSET ?';
+  if (input.category) {
+    sql += ' AND category = ?';
+    params.push(input.category);
+  }
+
+  sql += ` ORDER BY ${buildSortClause(input.sort)} LIMIT ? OFFSET ?`;
   params.push(input.limit, input.offset);
 
   const result = await db.prepare(sql).bind(...params).all<SkillRow>();
   return result.results ?? [];
+}
+
+function buildSortClause(sort: SkillSearchSort | undefined): string {
+  switch (sort) {
+    case 'recent':
+      return 'CASE WHEN last_scanned_at IS NULL THEN 1 ELSE 0 END, last_scanned_at DESC, last_updated_at DESC';
+    case 'name:asc':
+      return 'name COLLATE NOCASE ASC, slug ASC';
+    case 'installs:desc':
+    default:
+      return 'installs DESC, last_updated_at DESC';
+  }
 }
 
 export async function getSkillBySourceAndSlug(db: D1Database, source: string, slug: string) {

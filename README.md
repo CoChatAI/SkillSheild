@@ -183,7 +183,7 @@ npx pnpm@10.6.3 --filter @skillshield/dashboard test
 - `/clawhub/api/v1/*` ClawHub-compatible mirror routes
 - `/skills/*` skills.sh mirror routes
 - `/api/v1/stats`
-- `/api/v1/search`
+- `/api/v1/search` — accepts `q`, `source`, `verdict`, `category`, `sort` (`installs:desc` (default), `recent`, `name:asc`), `limit` (max 100), `offset`
 - `/api/v1/recent`
 - `/api/v1/verify/:source/:slug`
 - `/reports/*`
@@ -242,6 +242,12 @@ For the exact production sequence, use:
 - `.github/workflows/deploy-worker.yml`
 - `.github/workflows/deploy-scanner.yml`
 - `.github/workflows/full-scrape.yml`
+- `.github/workflows/installs-refresh.yml` — daily skills.sh install-count refresh
+
+### Database migrations
+
+- `packages/worker/schema.sql` — base schema for fresh D1 databases
+- `packages/worker/migrations/0001_add_category_and_installs_metadata.sql` — adds `category`, `installs_updated_at`, and the matching indexes to existing deployments. Apply with `wrangler d1 execute --file=packages/worker/migrations/0001_add_category_and_installs_metadata.sql`.
 
 ## Validation
 
