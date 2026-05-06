@@ -3,8 +3,11 @@ primary_region = "ord"
 kill_signal = "SIGINT"
 kill_timeout = "5s"
 
+# Dockerfile + build context are passed explicitly on the CLI in
+# .github/workflows/deploy-scanner.yml because the Dockerfile copies from
+# repo-root paths.  We keep an empty [build] section so the validate step's
+# `grep '^\[build\]'` still matches the expected fly.toml shape.
 [build]
-  dockerfile = "packages/scanner/Dockerfile"
 
 [env]
   NODE_ENV = "production"

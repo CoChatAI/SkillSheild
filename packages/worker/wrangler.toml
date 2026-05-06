@@ -37,7 +37,12 @@ max_retries = 8
 retry_delay = 30
 
 [env.production]
-routes = ["skillshield.cochat.ai/*"]
+# zone_name is required because the cochat.ai zone uses Cloudflare's
+# wildcard-host SSL-for-SaaS entitlement; without it the routes API rejects
+# bare-string patterns ("you must specify the zone per route" 10082).
+routes = [
+  { pattern = "skillshield.cochat.ai/*", zone_name = "cochat.ai" }
+]
 
 [env.production.vars]
 ENVIRONMENT = "production"
