@@ -114,7 +114,26 @@ export function createApp() {
     ),
   );
 
+  app.onError((error, c) => {
+    console.error('[worker] Unhandled route error', error);
+
+    if (isAuthorizedOperatorRequest(c.req.raw, c.env) && c.req.path.startsWith('/api/v1/scrape-runs')) {
+      return c.json({ error: 'internal_error', message: error.message }, 500, { 'Cache-Control': 'no-store' });
+    }
+
+    return c.json({ error: 'internal_error', message: 'Internal Server Error' }, 500, { 'Cache-Control': 'no-store' });
+  });
+
   return app;
+}
+
+function isAuthorizedOperatorRequest(request: Request, env: WorkerBindings) {
+  const authorizationHeader = request.headers.get('Authorization');
+  const validTokens = [env.SCANNER_AUTH_TOKEN, env.WEBHOOK_SECRET].filter((token): token is string => {
+    return typeof token === 'string' && token.length > 0;
+  });
+
+  return validTokens.some((token) => authorizationHeader === `Bearer ${token}`);
 }
 
 function getBatchValue(results: D1Result<unknown>[], index: number, key: string) {
