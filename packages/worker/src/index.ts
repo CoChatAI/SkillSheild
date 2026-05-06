@@ -117,7 +117,7 @@ export function createApp() {
   app.onError((error, c) => {
     console.error('[worker] Unhandled route error', error);
 
-    if (isAuthorizedOperatorRequest(c.req.raw, c.env) && c.req.path.startsWith('/api/v1/scrape-runs')) {
+    if (isAuthorizedOperatorRequest(c.req.raw, c.env) && isOperatorDiagnosticPath(c.req.path)) {
       return c.json({
         error: 'internal_error',
         name: error.name,
@@ -130,6 +130,10 @@ export function createApp() {
   });
 
   return app;
+}
+
+function isOperatorDiagnosticPath(path: string) {
+  return path.startsWith('/api/v1/scrape-runs') || path === '/api/v1/scan-queue';
 }
 
 function isAuthorizedOperatorRequest(request: Request, env: WorkerBindings) {

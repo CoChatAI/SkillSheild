@@ -262,7 +262,17 @@ apiRoutes.post('/scan-queue', async (c) => {
     return c.json({ error: parsedBody.error.issues[0]?.message ?? 'Invalid scan queue payload.' }, 400, { 'Cache-Control': 'no-store' });
   }
 
-  await c.env.SCAN_QUEUE.send(parsedBody.data);
+  try {
+    await c.env.SCAN_QUEUE.send(parsedBody.data);
+  } catch (error) {
+    console.error('[api] Failed to enqueue scan job', error);
+    return c.json({
+      error: 'queue_send_failed',
+      name: error instanceof Error ? error.name : 'Error',
+      message: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    }, 500, { 'Cache-Control': 'no-store' });
+  }
 
   return c.json({ success: true }, 202, { 'Cache-Control': 'no-store' });
 });

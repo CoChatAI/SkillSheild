@@ -222,6 +222,38 @@ describe('scrape status routes', () => {
     ]);
   });
 
+  it('returns queue send failures to authorized scanner enqueue requests', async () => {
+    const queue = createRecordingQueue({ sendError: new Error('Queue unavailable') });
+    const response = await app.request(
+      'http://localhost/api/v1/scan-queue',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: 'Bearer scanner-secret',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          type: 'scan',
+          source: 'skills-sh',
+          slug: 'anthropics/skills/frontend-design',
+          version: 'latest',
+          run_id: 'run-2',
+          job_id: 'job-2',
+          triggered_by: 'full_scrape',
+          event_id: 'run-2',
+        }),
+      },
+      createEnv({ queue }),
+    );
+
+    expect(response.status).toBe(500);
+    await expect(response.json()).resolves.toMatchObject({
+      error: 'queue_send_failed',
+      name: 'Error',
+      message: 'Queue unavailable',
+    });
+  });
+
   it('refreshes counters and reconciles scrape run status', async () => {
     const database = createRecordingDatabase();
     const response = await app.request(
@@ -301,12 +333,16 @@ function createRecordingDatabase(options: { activeRunId?: string; recentlyScanne
   } as D1Database & { statements: Array<{ sql: string; params: unknown[] }> };
 }
 
-function createRecordingQueue() {
+function createRecordingQueue(options: { sendError?: Error } = {}) {
   const messages: unknown[] = [];
 
   return {
     messages,
     async send(message: unknown) {
+      if (options.sendError) {
+        throw options.sendError;
+      }
+
       messages.push(message);
     },
   } as unknown as Queue & { messages: unknown[] };
