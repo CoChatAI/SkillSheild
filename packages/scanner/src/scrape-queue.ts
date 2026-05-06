@@ -64,7 +64,7 @@ async function postJson<TResponse = void>(
 
   if (!response.ok) {
     const errorBody = await response.text().catch(() => '');
-    throw new Error(`Scrape queue API request failed (${response.status}): ${errorBody || response.statusText}`);
+    throw new Error(`Scrape queue API request failed for ${path} (${response.status}): ${errorBody || response.statusText}`);
   }
 
   if (response.status === 204) {

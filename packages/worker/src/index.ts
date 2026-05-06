@@ -118,7 +118,12 @@ export function createApp() {
     console.error('[worker] Unhandled route error', error);
 
     if (isAuthorizedOperatorRequest(c.req.raw, c.env) && c.req.path.startsWith('/api/v1/scrape-runs')) {
-      return c.json({ error: 'internal_error', message: error.message }, 500, { 'Cache-Control': 'no-store' });
+      return c.json({
+        error: 'internal_error',
+        name: error.name,
+        message: error.message,
+        stack: error.stack,
+      }, 500, { 'Cache-Control': 'no-store' });
     }
 
     return c.json({ error: 'internal_error', message: 'Internal Server Error' }, 500, { 'Cache-Control': 'no-store' });
