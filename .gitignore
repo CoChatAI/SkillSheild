@@ -7,7 +7,6 @@ dist/
 .env.*
 coverage/
 *.tsbuildinfo
-pnpm-lock.yaml
 
 # Local scanner scratch space
 tmp/
