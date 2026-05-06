@@ -95,7 +95,7 @@ jobs:
           test -n "$CLOUDFLARE_ACCOUNT_ID"
 
       - name: Require default branch for production deploy
-        run: test "$GITHUB_REF_NAME" = "$GITHUB_EVENT_REPOSITORY_DEFAULT_BRANCH"
+        run: test "$GITHUB_REF_NAME" = "${{ github.event.repository.default_branch }}"
 
       - name: Deploy Worker
         working-directory: packages/worker
