@@ -1,0 +1,70 @@
+name: One-shot — clean up stale skills.sh rows
+
+on:
+  workflow_dispatch:
+    inputs:
+      cutoff_iso:
+        description: ISO timestamp; rows with last_updated_at < this are deleted (e.g. 2026-05-06T13:39:22Z)
+        required: true
+        type: string
+      dry_run:
+        description: Show counts + sample without deleting (default true)
+        required: true
+        default: 'true'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+
+permissions:
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      CUTOFF_ISO: ${{ inputs.cutoff_iso }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.3
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Show what would be deleted
+        working-directory: packages/worker
+        run: |
+          echo "Cutoff: $CUTOFF_ISO"
+          pnpm exec wrangler d1 execute skillshield-db --env production --remote \
+            --command "SELECT COUNT(*) AS stale_count FROM skills WHERE source = 'skills-sh' AND last_updated_at < '$CUTOFF_ISO';"
+          echo
+          echo "Sample of rows that would be deleted (first 25 by slug):"
+          pnpm exec wrangler d1 execute skillshield-db --env production --remote \
+            --command "SELECT slug, verdict, last_updated_at FROM skills WHERE source = 'skills-sh' AND last_updated_at < '$CUTOFF_ISO' ORDER BY slug ASC LIMIT 25;"
+
+      - name: Delete stale rows
+        if: ${{ inputs.dry_run == 'false' }}
+        working-directory: packages/worker
+        run: |
+          # scan_runs has an FK on skills(id); drop those first.
+          pnpm exec wrangler d1 execute skillshield-db --env production --remote \
+            --command "DELETE FROM scan_runs WHERE skill_id IN (SELECT id FROM skills WHERE source = 'skills-sh' AND last_updated_at < '$CUTOFF_ISO');"
+          pnpm exec wrangler d1 execute skillshield-db --env production --remote \
+            --command "DELETE FROM skills WHERE source = 'skills-sh' AND last_updated_at < '$CUTOFF_ISO';"
+          echo
+          echo "Post-cleanup count:"
+          pnpm exec wrangler d1 execute skillshield-db --env production --remote \
+            --command "SELECT source, COUNT(*) AS total FROM skills GROUP BY source ORDER BY source;"
