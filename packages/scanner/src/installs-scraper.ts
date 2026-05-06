@@ -48,17 +48,21 @@ export interface CloudflareD1Config {
   databaseId: string;
 }
 
-// skills.sh embeds its homepage data in a Next.js RSC payload that contains
-// quoted JSON-ish entries shaped roughly like:
+// skills.sh embeds its homepage data in a Next.js RSC payload as a *string*,
+// which means the embedded JSON is escape-encoded inside the script tag —
+// every double quote is rendered as \".  Each record looks like:
 //
-//   {"slug":"vercel/skills/seo-audit","installs":1353667,"name":"...","source":"vercel/skills"}
+//   \"source\":\"vercel-labs/skills\",\"skillId\":\"find-skills\",\"name\":\"...\",\"installs\":1361925
 //
-// We don't get a stable structured contract, so we rely on the slug+installs
-// pair appearing within a small window of each other in the HTML.  This is
-// resilient to most layout shuffles and only fails if the keys are renamed.
-const SLUG_PATTERN = /"slug"\s*:\s*"([^"]+)"/g;
-const INSTALLS_PATTERN = /"installs"\s*:\s*(\d+)/g;
-const PAIR_WINDOW = 600;
+// We pull out the (source, skillId, installs) triple in one regex so each
+// match is self-contained — no heuristic windowing.  The full slug used by
+// SkillShield's D1 row id is `${source}/${skillId}`.
+//
+// `[\s\S]*?` between fields keeps the tuple regex resilient to extra
+// fields that skills.sh may add between source and installs without
+// rewriting this scraper.
+const RECORD_PATTERN =
+  /\\"source\\":\\"([^"\\]+)\\"[\s\S]{0,200}?\\"skillId\\":\\"([^"\\]+)\\"[\s\S]{0,200}?\\"installs\\":(\d+)/g;
 
 /**
  * Fetches the skills.sh homepage variants and extracts (slug, installs) pairs.
@@ -98,65 +102,34 @@ export async function scrapeSkillsShInstalls(
 }
 
 /**
- * Pulls all `slug` / `installs` pairs out of a single HTML document.  Only
- * pairs whose `installs` token follows the matching `slug` token within
- * `PAIR_WINDOW` characters are emitted, which keeps us from accidentally
- * pairing a slug with the install count of a sibling skill that happens to
- * appear later in the payload.
+ * Pulls all (source, skillId, installs) triples out of a single HTML
+ * document and folds them into `${source}/${skillId}` slugs.
+ *
+ * Slugs that appear multiple times across discovery pages keep the highest
+ * install count seen — skills.sh occasionally renders the same skill on
+ * the home page and on /trending with slightly different counts and the
+ * larger one is the correct one.
  */
 export function extractInstallRecordsFromHtml(html: string): { slug: string; installs: number }[] {
-  const slugMatches: { slug: string; index: number }[] = [];
-  let slugMatch: RegExpExecArray | null;
-  SLUG_PATTERN.lastIndex = 0;
-  while ((slugMatch = SLUG_PATTERN.exec(html)) !== null) {
-    const rawSlug = slugMatch[1] ?? '';
-    if (!isSkillsShSlug(rawSlug)) {
-      continue;
-    }
-    slugMatches.push({ slug: rawSlug, index: slugMatch.index });
-  }
-
-  const installMatches: { installs: number; index: number }[] = [];
-  let installMatch: RegExpExecArray | null;
-  INSTALLS_PATTERN.lastIndex = 0;
-  while ((installMatch = INSTALLS_PATTERN.exec(html)) !== null) {
-    const value = Number.parseInt(installMatch[1] ?? '0', 10);
-    if (!Number.isFinite(value) || value < 0) {
-      continue;
-    }
-    installMatches.push({ installs: value, index: installMatch.index });
-  }
-
-  if (slugMatches.length === 0 || installMatches.length === 0) {
-    return [];
-  }
-
   const records = new Map<string, number>();
-  let installCursor = 0;
-
-  for (const slug of slugMatches) {
-    while (
-      installCursor < installMatches.length
-      && installMatches[installCursor]!.index < slug.index
-    ) {
-      installCursor += 1;
-    }
-
-    const candidate = installMatches[installCursor];
-    if (!candidate) {
-      break;
-    }
-
-    if (candidate.index - slug.index > PAIR_WINDOW) {
+  RECORD_PATTERN.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  while ((match = RECORD_PATTERN.exec(html)) !== null) {
+    const source = match[1] ?? '';
+    const skillId = match[2] ?? '';
+    const installs = Number.parseInt(match[3] ?? '0', 10);
+    if (!source || !skillId || !Number.isFinite(installs) || installs < 0) {
       continue;
     }
-
-    const previous = records.get(slug.slug);
-    if (previous === undefined || candidate.installs > previous) {
-      records.set(slug.slug, candidate.installs);
+    const slug = `${source}/${skillId}`;
+    if (!isSkillsShSlug(slug)) {
+      continue;
+    }
+    const previous = records.get(slug);
+    if (previous === undefined || installs > previous) {
+      records.set(slug, installs);
     }
   }
-
   return [...records.entries()].map(([slug, installs]) => ({ slug, installs }));
 }
 

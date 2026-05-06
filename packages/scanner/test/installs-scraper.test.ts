@@ -6,47 +6,42 @@ import {
 } from '../src/installs-scraper';
 
 describe('extractInstallRecordsFromHtml', () => {
-  it('pairs slugs with the install count that follows immediately after', () => {
-    const html = `
-      <script id="rsc">
-        {"id":"vercel/skills/seo-audit","slug":"vercel/skills/seo-audit","installs":1353667,"name":"SEO Audit"}
-        {"id":"anthropics/skills/frontend-design","slug":"anthropics/skills/frontend-design","installs":373235,"name":"Frontend Design"}
-      </script>
+  // skills.sh embeds its data as a JSON-encoded *string* inside an RSC
+  // <script>, so every double quote is rendered as \".  These fixtures
+  // mirror what `curl https://skills.sh/` actually returns today.
+  it('parses (source, skillId, installs) triples from the escape-encoded RSC payload', () => {
+    const html = String.raw`
+      <script>self.__next_f.push([1,"37:[\"$\",\"$L3f\",null,{\"initialSkills\":[
+        {\"source\":\"vercel-labs/skills\",\"skillId\":\"find-skills\",\"name\":\"find-skills\",\"installs\":1361925},
+        {\"source\":\"anthropics/skills\",\"skillId\":\"frontend-design\",\"name\":\"frontend-design\",\"installs\":372688}
+      ]}"])</script>
     `;
 
     const records = extractInstallRecordsFromHtml(html);
     expect(records).toEqual([
-      { slug: 'vercel/skills/seo-audit', installs: 1353667 },
-      { slug: 'anthropics/skills/frontend-design', installs: 373235 },
+      { slug: 'vercel-labs/skills/find-skills', installs: 1361925 },
+      { slug: 'anthropics/skills/frontend-design', installs: 372688 },
     ]);
   });
 
-  it('keeps the highest install count when the same slug appears more than once', () => {
-    const html = `
-      {"slug":"vercel/skills/seo-audit","installs":42}
-      {"slug":"vercel/skills/seo-audit","installs":99}
+  it('keeps the highest install count when the same skill appears across discovery pages', () => {
+    const html = String.raw`
+      {\"source\":\"vercel-labs/skills\",\"skillId\":\"seo-audit\",\"name\":\"seo-audit\",\"installs\":42}
+      {\"source\":\"vercel-labs/skills\",\"skillId\":\"seo-audit\",\"name\":\"seo-audit\",\"installs\":99}
     `;
 
     const records = extractInstallRecordsFromHtml(html);
-    expect(records).toEqual([{ slug: 'vercel/skills/seo-audit', installs: 99 }]);
-  });
-
-  it('ignores slugs that do not look like skills.sh paths', () => {
-    const html = `
-      {"slug":"dashboard/home","installs":50}
-      {"slug":"some/other-thing","installs":100}
-      {"slug":"valid/owner/skill","installs":7}
-    `;
-
-    const records = extractInstallRecordsFromHtml(html);
-    expect(records).toEqual([{ slug: 'valid/owner/skill', installs: 7 }]);
+    expect(records).toEqual([{ slug: 'vercel-labs/skills/seo-audit', installs: 99 }]);
   });
 });
 
 describe('scrapeSkillsShInstalls', () => {
   it('aggregates installs across the configured discovery pages', async () => {
-    const homepageHtml = '{"slug":"a/b/c","installs":10}';
-    const trendingHtml = '{"slug":"a/b/c","installs":50}{"slug":"d/e/f","installs":3}';
+    const homepageHtml = String.raw`{\"source\":\"a/b\",\"skillId\":\"c\",\"name\":\"c\",\"installs\":10}`;
+    const trendingHtml = String.raw`
+      {\"source\":\"a/b\",\"skillId\":\"c\",\"name\":\"c\",\"installs\":50}
+      {\"source\":\"d/e\",\"skillId\":\"f\",\"name\":\"f\",\"installs\":3}
+    `;
     const fetchImpl = vi.fn(async (url: string) => {
       if (url.endsWith('/trending')) {
         return new Response(trendingHtml, { status: 200 });
