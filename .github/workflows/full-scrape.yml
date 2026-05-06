@@ -36,6 +36,11 @@ on:
         required: true
         default: false
         type: boolean
+      force:
+        description: Bypass an existing active scrape run lock.
+        required: true
+        default: false
+        type: boolean
       base_url:
         description: Optional scanner base URL override. Falls back to repository variable SCANNER_BASE_URL.
         required: false
@@ -66,10 +71,11 @@ jobs:
           LIMIT: ${{ inputs.limit }}
           DELAY_MS: ${{ inputs.delay_ms }}
           USE_LLM: ${{ inputs.use_llm }}
+          FORCE: ${{ inputs.force }}
           INPUT_BASE_URL: ${{ inputs.base_url }}
           REPOSITORY_BASE_URL: ${{ vars.SCANNER_BASE_URL }}
         run: |
-          request_path="/scrape/${SOURCE}?wait=${WAIT}&useLlm=${USE_LLM}"
+          request_path="/scrape/${SOURCE}?wait=${WAIT}&useLlm=${USE_LLM}&force=${FORCE}"
 
           if [ -n "$LIMIT" ]; then
             request_path="${request_path}&limit=${LIMIT}"
