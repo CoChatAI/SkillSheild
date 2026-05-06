@@ -122,7 +122,7 @@ jobs:
 
     steps:
       - name: Require default branch for production scrape runs
-        run: test "$GITHUB_REF_NAME" = "$GITHUB_EVENT_REPOSITORY_DEFAULT_BRANCH"
+        run: test "$GITHUB_REF_NAME" = "${{ github.event.repository.default_branch }}"
 
       - name: Require configured scanner endpoint
         run: |
