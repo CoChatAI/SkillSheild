@@ -1,0 +1,62 @@
+name: Inspect Queue
+
+on:
+  workflow_dispatch:
+    inputs:
+      queue_name:
+        description: Cloudflare Queue name to inspect.
+        required: true
+        default: scan-jobs
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: inspect-queue-${{ inputs.queue_name }}
+  cancel-in-progress: false
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      QUEUE_NAME: ${{ inputs.queue_name }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.3
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Require Cloudflare credentials
+        run: |
+          test -n "$CLOUDFLARE_API_TOKEN"
+          test -n "$CLOUDFLARE_ACCOUNT_ID"
+
+      - name: List queues
+        working-directory: packages/worker
+        run: pnpm exec wrangler queues list --config wrangler.toml
+
+      - name: Inspect queue
+        working-directory: packages/worker
+        run: pnpm exec wrangler queues info "$QUEUE_NAME" --config wrangler.toml
+
+      - name: List worker consumers
+        working-directory: packages/worker
+        run: pnpm exec wrangler queues consumer worker list "$QUEUE_NAME" --json --config wrangler.toml
