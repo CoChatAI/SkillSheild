@@ -5,7 +5,7 @@ import { determineVerdict, scanSkill } from './scanner';
 import { publishResults, type PublishVerdict } from './publisher';
 import { ClawHubAdapter } from './adapters/clawhub';
 import { SkillsShAdapter } from './adapters/skills-sh';
-import { resolveSkillCategory } from './category';
+import { resolveSkillFrontmatterSummary } from './category';
 import type { SkillRecordMetadata } from './db';
 
 export interface ScannerSkillListItem {
@@ -93,7 +93,7 @@ export async function executeScanJob(
     skillDir = await adapter.fetch(slug, job.version);
     const scanResult = await scanSkillImpl(skillDir, buildScanOptions());
     const verdict = buildPublishVerdict(scanResult.maxSeverity, scanResult.findingsCount);
-    const categoryResult = await resolveSkillCategory({ skillDir, fallback: slug });
+    const summary = await resolveSkillFrontmatterSummary({ skillDir, fallback: slug });
 
     await publishResultsImpl({
       source,
@@ -103,13 +103,14 @@ export async function executeScanJob(
       scanResult,
       verdict,
       metadata: {
-        category: categoryResult.category,
+        category: summary.category,
+        description: summary.description,
       },
     });
 
     logger.log(
       `[scan] Complete: ${source}/${slug} -> ${verdict.verdict}`
-        + (categoryResult.category ? ` (category=${categoryResult.category}, source=${categoryResult.source})` : ''),
+        + (summary.category ? ` (category=${summary.category})` : ''),
     );
 
     return {
@@ -162,11 +163,12 @@ export async function runFullSourceScrape(
 
       const scanResult = await scanSkillImpl(skillDir, scanOptions);
       const verdict = buildPublishVerdict(scanResult.maxSeverity, scanResult.findingsCount);
-      const categoryResult = await resolveSkillCategory({ skillDir, fallback: skill.slug });
+      const summary = await resolveSkillFrontmatterSummary({ skillDir, fallback: skill.slug });
       const baseMetadata = buildMetadata(skill);
       const metadata: SkillRecordMetadata = {
         ...baseMetadata,
-        category: categoryResult.category,
+        category: summary.category,
+        description: summary.description,
       };
 
       await publishResultsImpl({
@@ -183,7 +185,7 @@ export async function runFullSourceScrape(
       completed += 1;
       logger.log(
         `[scrape] Complete: ${source}/${skill.slug} -> ${verdict.verdict}`
-          + (categoryResult.category ? ` (category=${categoryResult.category}, source=${categoryResult.source})` : ''),
+          + (summary.category ? ` (category=${summary.category})` : ''),
       );
     } catch (error) {
       failed += 1;

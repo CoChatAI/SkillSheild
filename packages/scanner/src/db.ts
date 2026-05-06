@@ -68,7 +68,9 @@ export function buildD1Statements(payload: PublishDatabasePayload): D1Statement[
         ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         'ON CONFLICT(id) DO UPDATE SET',
         '  name = excluded.name,',
-        '  description = excluded.description,',
+        // Preserve a previously-written description on a re-scan that fails
+        // to read the SKILL.md frontmatter — better stale text than blank.
+        '  description = COALESCE(excluded.description, skills.description),',
         '  author = excluded.author,',
         '  latest_version = excluded.latest_version,',
         '  latest_scanned_version = excluded.latest_scanned_version,',

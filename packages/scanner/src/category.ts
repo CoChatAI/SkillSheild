@@ -36,6 +36,11 @@ export interface ResolveCategoryResult {
   source: 'frontmatter' | 'heuristic' | 'unknown';
 }
 
+export interface SkillFrontmatterSummary {
+  category: SkillCategory | null;
+  description: string | null;
+}
+
 export async function readSkillFrontmatter(skillDir: string): Promise<SkillFrontmatter | null> {
   const skillMarkdownPath = join(skillDir, 'SKILL.md');
 
@@ -52,6 +57,38 @@ export async function readSkillFrontmatter(skillDir: string): Promise<SkillFront
   }
 
   return parseFrontmatterYaml(match[1] ?? '');
+}
+
+export async function resolveSkillFrontmatterSummary(
+  input: ResolveCategoryInput,
+): Promise<SkillFrontmatterSummary> {
+  const frontmatter = await readSkillFrontmatter(input.skillDir);
+  const rawCategory = typeof frontmatter?.category === 'string' ? frontmatter.category.trim() : '';
+  const category = rawCategory.length > 0
+    ? normalizeCategory(rawCategory)
+    : guessCategoryFromText({
+        name: typeof frontmatter?.name === 'string' ? frontmatter.name : undefined,
+        description: typeof frontmatter?.description === 'string' ? frontmatter.description : undefined,
+        fallback: input.fallback,
+      });
+
+  const rawDescription = typeof frontmatter?.description === 'string'
+    ? frontmatter.description.trim()
+    : '';
+
+  return {
+    category,
+    description: rawDescription.length > 0 ? truncateDescription(rawDescription) : null,
+  };
+}
+
+function truncateDescription(value: string): string {
+  // Card view shows ~2 lines; cap so the metadata payload stays small.
+  const MAX_LENGTH = 280;
+  if (value.length <= MAX_LENGTH) {
+    return value;
+  }
+  return `${value.slice(0, MAX_LENGTH - 1).trimEnd()}…`;
 }
 
 export async function resolveSkillCategory(input: ResolveCategoryInput): Promise<ResolveCategoryResult> {
