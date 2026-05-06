@@ -59,7 +59,7 @@ bucket_name = "skillshield-meta"
 [[env.production.d1_databases]]
 binding = "DB"
 database_name = "skillshield-db"
-database_id = "terraform-output-placeholder"
+database_id = "70d1e92a-ccaa-4e84-bfc3-03ffb9966297"
 
 [[env.production.queues.producers]]
 queue = "scan-jobs"

@@ -95,4 +95,9 @@ jobs:
         run: test -n "$FLY_API_TOKEN"
 
       - name: Deploy scanner to Fly
-        run: flyctl deploy --config packages/scanner/fly.toml --remote-only
+        # Build context = repo root because the Dockerfile copies from
+        # repo-root paths (package.json, packages/scanner/*, packages/shared/*).
+        # flyctl resolves --dockerfile relative to the trailing context arg,
+        # which avoids the doubled-path bug that hit when only fly.toml's
+        # `[build] dockerfile` was set ("packages/scanner/packages/scanner/...").
+        run: flyctl deploy --config packages/scanner/fly.toml --dockerfile packages/scanner/Dockerfile --remote-only .
