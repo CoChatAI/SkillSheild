@@ -1,6 +1,13 @@
 import { Hono } from 'hono';
 import { searchResponseSchema } from '@skillshield/shared';
-import { getSkillBySourceAndSlug, listRecentSkills, parseSkillMetadata, searchSkills, type SkillRow } from '../lib/d1';
+import {
+  getSkillBySourceAndSlug,
+  listRecentSkills,
+  parseSkillMetadata,
+  parseSkillSearchSort,
+  searchSkills,
+  type SkillRow,
+} from '../lib/d1';
 import { buildPublicBadgeUrl, buildPublicReportUrl } from '../lib/public';
 import type { WorkerBindings } from '../types';
 
@@ -16,6 +23,7 @@ apiCompatibilityRoutes.get('/search', async (c) => {
     offset: 0,
     query: query && query.length > 0 ? query : undefined,
     source: 'skills-sh',
+    sort: 'installs:desc',
   });
   const skills = results
     .filter((row) => row.verdict === 'verified' || row.verdict === 'caution')
@@ -33,6 +41,8 @@ apiRoutes.get('/search', async (c) => {
   const query = c.req.query('q')?.trim();
   const source = c.req.query('source')?.trim();
   const verdict = c.req.query('verdict')?.trim();
+  const category = c.req.query('category')?.trim();
+  const sort = parseSkillSearchSort(c.req.query('sort'));
 
   const results = await searchSkills(c.env.DB, {
     limit,
@@ -40,6 +50,8 @@ apiRoutes.get('/search', async (c) => {
     query: query && query.length > 0 ? query : undefined,
     source: source && source.length > 0 ? source : undefined,
     verdict: verdict && verdict.length > 0 ? verdict : undefined,
+    category: category && category.length > 0 ? category : undefined,
+    sort,
   });
 
   return c.json(
@@ -112,12 +124,14 @@ function buildSearchSkillRecord(row: SkillRow) {
     name: row.name,
     description: row.description,
     author: row.author,
+    category: row.category,
     latestVersion: row.latest_version,
     latestScannedVersion: row.latest_scanned_version,
     verdict: row.verdict,
     scanSeverity: row.scan_severity,
     findingsCount: row.findings_count ?? 0,
     installs: row.installs ?? 0,
+    installsUpdatedAt: row.installs_updated_at,
     firstSeenAt: row.first_seen_at ?? row.last_updated_at ?? new Date(0).toISOString(),
     lastScannedAt: row.last_scanned_at,
     lastUpdatedAt: row.last_updated_at ?? new Date(0).toISOString(),

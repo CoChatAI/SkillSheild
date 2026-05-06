@@ -9,12 +9,14 @@ type SkillFixture = {
   name: string;
   description: string | null;
   author: string | null;
+  category: string | null;
   latest_version: string | null;
   latest_scanned_version: string | null;
   verdict: 'verified' | 'caution' | 'blocked' | 'pending';
   scan_severity: 'none' | 'low' | 'medium' | 'high' | 'critical' | null;
   findings_count: number;
   installs: number;
+  installs_updated_at: string | null;
   first_seen_at: string;
   last_scanned_at: string | null;
   last_updated_at: string;
@@ -41,12 +43,14 @@ const skills: SkillFixture[] = [
     name: 'Trello',
     description: 'Kanban helper',
     author: 'Acme',
+    category: 'Productivity',
     latest_version: '1.2.3',
     latest_scanned_version: '1.2.3',
     verdict: 'verified',
     scan_severity: 'none',
     findings_count: 0,
     installs: 100,
+    installs_updated_at: '2026-03-21T12:00:00.000Z',
     first_seen_at: '2026-03-01T00:00:00.000Z',
     last_scanned_at: '2026-03-21T12:00:00.000Z',
     last_updated_at: '2026-03-21T12:00:00.000Z',
@@ -61,12 +65,14 @@ const skills: SkillFixture[] = [
     name: 'Skill Name',
     description: 'skills.sh mirror entry',
     author: 'Repo Owner',
+    category: 'Engineering',
     latest_version: 'main',
     latest_scanned_version: 'main',
     verdict: 'caution',
     scan_severity: 'medium',
     findings_count: 2,
     installs: 40,
+    installs_updated_at: '2026-03-20T11:00:00.000Z',
     first_seen_at: '2026-03-02T00:00:00.000Z',
     last_scanned_at: '2026-03-20T11:00:00.000Z',
     last_updated_at: '2026-03-20T11:00:00.000Z',
@@ -81,12 +87,14 @@ const skills: SkillFixture[] = [
     name: 'Blocked Skill',
     description: 'Unsafe',
     author: 'Acme',
+    category: null,
     latest_version: '9.9.9',
     latest_scanned_version: '9.9.9',
     verdict: 'blocked',
     scan_severity: 'critical',
     findings_count: 5,
     installs: 5,
+    installs_updated_at: null,
     first_seen_at: '2026-03-03T00:00:00.000Z',
     last_scanned_at: '2026-03-19T10:00:00.000Z',
     last_updated_at: '2026-03-19T10:00:00.000Z',
@@ -101,12 +109,14 @@ const skills: SkillFixture[] = [
     name: 'Pending Skill',
     description: 'Still scanning',
     author: 'Acme',
+    category: null,
     latest_version: '0.0.1',
     latest_scanned_version: null,
     verdict: 'pending',
     scan_severity: null,
     findings_count: 0,
     installs: 1,
+    installs_updated_at: null,
     first_seen_at: '2026-03-04T00:00:00.000Z',
     last_scanned_at: null,
     last_updated_at: '2026-03-18T10:00:00.000Z',
@@ -188,12 +198,14 @@ describe('public worker routes', () => {
           name: 'Skill Name',
           description: 'skills.sh mirror entry',
           author: 'Repo Owner',
+          category: 'Engineering',
           latestVersion: 'main',
           latestScannedVersion: 'main',
           verdict: 'caution',
           scanSeverity: 'medium',
           findingsCount: 2,
           installs: 40,
+          installsUpdatedAt: '2026-03-20T11:00:00.000Z',
           firstSeenAt: '2026-03-02T00:00:00.000Z',
           lastScannedAt: '2026-03-20T11:00:00.000Z',
           lastUpdatedAt: '2026-03-20T11:00:00.000Z',
@@ -205,6 +217,35 @@ describe('public worker routes', () => {
       count: 1,
       offset: 0,
     });
+  });
+
+  it('honors sort=name:asc on /api/v1/search', async () => {
+    const response = await app.request(
+      'http://localhost/api/v1/search?sort=name%3Aasc&limit=10',
+      {},
+      createEnv(),
+    );
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as { skills: Array<{ slug: string }> };
+    expect(payload.skills.map((skill) => skill.slug)).toEqual([
+      'blocked-skill',
+      'pending-skill',
+      'owner/repo/skill-name',
+      'trello',
+    ]);
+  });
+
+  it('filters by category on /api/v1/search', async () => {
+    const response = await app.request(
+      'http://localhost/api/v1/search?category=Engineering&limit=10',
+      {},
+      createEnv(),
+    );
+
+    expect(response.status).toBe(200);
+    const payload = (await response.json()) as { skills: Array<{ slug: string }> };
+    expect(payload.skills.map((skill) => skill.slug)).toEqual(['owner/repo/skill-name']);
   });
 
   it('serves a skills.sh-compatible search response for the `skills` CLI', async () => {
@@ -395,6 +436,7 @@ function executeAll(sql: string, params: unknown[]) {
   let query: string | undefined;
   let source: string | undefined;
   let verdict: string | undefined;
+  let category: string | undefined;
 
   if (sql.includes('(name LIKE ? OR description LIKE ? OR slug LIKE ?)')) {
     query = String(params[paramIndex]).slice(1, -1).toLowerCase();
@@ -411,21 +453,51 @@ function executeAll(sql: string, params: unknown[]) {
     paramIndex += 1;
   }
 
+  if (sql.includes('AND category = ?')) {
+    category = String(params[paramIndex]);
+    paramIndex += 1;
+  }
+
   const limit = Number(params[paramIndex]);
   const offset = Number(params[paramIndex + 1]);
 
-  return skills
+  const filtered = skills
     .filter((skill) => (source ? skill.source === source : true))
     .filter((skill) => (verdict ? skill.verdict === verdict : true))
+    .filter((skill) => (category ? skill.category === category : true))
     .filter((skill) => {
       if (!query) {
         return true;
       }
 
       return [skill.slug, skill.name, skill.description ?? ''].join(' ').toLowerCase().includes(query);
-    })
-    .sort((left, right) => right.installs - left.installs || right.last_updated_at.localeCompare(left.last_updated_at))
-    .slice(offset, offset + limit);
+    });
+
+  const sorted = [...filtered].sort((left, right) => {
+    if (sql.includes('ORDER BY name COLLATE NOCASE ASC')) {
+      const nameCompare = left.name.localeCompare(right.name, undefined, { sensitivity: 'base' });
+      return nameCompare !== 0 ? nameCompare : left.slug.localeCompare(right.slug);
+    }
+
+    if (sql.includes('ORDER BY CASE WHEN last_scanned_at IS NULL')) {
+      const leftMissing = left.last_scanned_at === null ? 1 : 0;
+      const rightMissing = right.last_scanned_at === null ? 1 : 0;
+      if (leftMissing !== rightMissing) {
+        return leftMissing - rightMissing;
+      }
+      const scannedCompare = (right.last_scanned_at ?? '').localeCompare(left.last_scanned_at ?? '');
+      return scannedCompare !== 0
+        ? scannedCompare
+        : right.last_updated_at.localeCompare(left.last_updated_at);
+    }
+
+    return (
+      right.installs - left.installs
+      || right.last_updated_at.localeCompare(left.last_updated_at)
+    );
+  });
+
+  return sorted.slice(offset, offset + limit);
 }
 
 function executeFirst(sql: string, params: unknown[]) {

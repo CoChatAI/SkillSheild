@@ -1,0 +1,59 @@
+name: Refresh skills.sh installs
+
+on:
+  schedule:
+    # Daily at 06:00 UTC. Refreshes the install counts that back the
+    # popularity sort on /api/v1/search?sort=installs:desc.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: Optional scanner base URL override. Falls back to repository variable SCANNER_BASE_URL.
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    env:
+      SCANNER_AUTH_TOKEN: ${{ secrets.SCANNER_AUTH_TOKEN }}
+      INPUT_BASE_URL: ${{ inputs.base_url }}
+      REPOSITORY_BASE_URL: ${{ vars.SCANNER_BASE_URL }}
+
+    steps:
+      - name: Resolve scanner endpoint
+        id: resolve
+        run: |
+          base_url="$INPUT_BASE_URL"
+          if [ -z "$base_url" ]; then
+            base_url="$REPOSITORY_BASE_URL"
+          fi
+
+          if [ -z "$base_url" ]; then
+            echo "SCANNER_BASE_URL is required to refresh installs." >&2
+            exit 1
+          fi
+
+          endpoint="${base_url%/}/scrape-installs"
+          echo "endpoint=$endpoint" >> "$GITHUB_OUTPUT"
+
+      - name: Trigger installs refresh
+        env:
+          ENDPOINT: ${{ steps.resolve.outputs.endpoint }}
+        run: |
+          auth_header=()
+          if [ -n "$SCANNER_AUTH_TOKEN" ]; then
+            auth_header=(-H "Authorization: Bearer $SCANNER_AUTH_TOKEN")
+          fi
+
+          curl --fail-with-body --show-error --silent \
+            -X POST \
+            -H "Content-Type: application/json" \
+            "${auth_header[@]}" \
+            "$ENDPOINT"

@@ -7,6 +7,8 @@ export interface SkillRecordMetadata {
   description?: string | null;
   author?: string | null;
   installs?: number;
+  installsUpdatedAt?: string | null;
+  category?: string | null;
   latestVersion?: string | null;
   metadata?: Record<string, unknown>;
 }
@@ -52,6 +54,8 @@ export function buildD1Statements(payload: PublishDatabasePayload): D1Statement[
   const metadataDescription = payload.metadata?.description ?? null;
   const metadataAuthor = payload.metadata?.author ?? null;
   const metadataInstalls = payload.metadata?.installs ?? 0;
+  const metadataInstallsUpdatedAt = payload.metadata?.installsUpdatedAt ?? null;
+  const metadataCategory = payload.metadata?.category ?? null;
   const metadataLatestVersion = payload.metadata?.latestVersion ?? payload.version;
 
   return [
@@ -59,9 +63,9 @@ export function buildD1Statements(payload: PublishDatabasePayload): D1Statement[
       sql: [
         'INSERT INTO skills (',
         '  id, source, slug, name, description, author, latest_version, latest_scanned_version,',
-        '  verdict, scan_severity, findings_count, installs, first_seen_at, last_scanned_at,',
-        '  last_updated_at, r2_key, report_r2_key, metadata',
-        ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        '  verdict, scan_severity, findings_count, installs, installs_updated_at, category,',
+        '  first_seen_at, last_scanned_at, last_updated_at, r2_key, report_r2_key, metadata',
+        ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
         'ON CONFLICT(id) DO UPDATE SET',
         '  name = excluded.name,',
         '  description = excluded.description,',
@@ -71,7 +75,13 @@ export function buildD1Statements(payload: PublishDatabasePayload): D1Statement[
         '  verdict = excluded.verdict,',
         '  scan_severity = excluded.scan_severity,',
         '  findings_count = excluded.findings_count,',
-        '  installs = excluded.installs,',
+        // installs is owned by the dedicated installs scraper.  Only fall
+        // back to the scanner-supplied value when the row has nothing
+        // recorded yet (NULL or 0), otherwise preserve whatever the scraper
+        // last wrote — even if the scan happens to ship a non-zero count.
+        '  installs = CASE WHEN skills.installs IS NULL OR skills.installs = 0 THEN excluded.installs ELSE skills.installs END,',
+        '  installs_updated_at = COALESCE(excluded.installs_updated_at, skills.installs_updated_at),',
+        '  category = COALESCE(excluded.category, skills.category),',
         '  last_scanned_at = excluded.last_scanned_at,',
         '  last_updated_at = excluded.last_updated_at,',
         '  r2_key = excluded.r2_key,',
@@ -91,6 +101,8 @@ export function buildD1Statements(payload: PublishDatabasePayload): D1Statement[
         payload.severity,
         payload.findingsCount,
         metadataInstalls,
+        metadataInstallsUpdatedAt,
+        metadataCategory,
         payload.scannedAt,
         payload.scannedAt,
         payload.scannedAt,

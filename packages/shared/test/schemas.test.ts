@@ -25,12 +25,14 @@ describe('shared schemas', () => {
       name: 'Trello',
       description: null,
       author: null,
+      category: null,
       latestVersion: '1.0.0',
       latestScannedVersion: '1.0.0',
       verdict: 'verified',
       scanSeverity: 'none',
       findingsCount: 0,
       installs: 12,
+      installsUpdatedAt: null,
       firstSeenAt: '2026-03-21T00:00:00.000Z',
       lastScannedAt: '2026-03-21T00:00:00.000Z',
       lastUpdatedAt: '2026-03-21T00:00:00.000Z',
@@ -39,6 +41,8 @@ describe('shared schemas', () => {
     });
 
     expect(parsed.metadata).toEqual({});
+    expect(parsed.category).toBeNull();
+    expect(parsed.installsUpdatedAt).toBeNull();
   });
 
   it('parses a normalized scanner result', () => {

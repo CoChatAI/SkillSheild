@@ -8,6 +8,11 @@ import {
   runFullSourceScrape,
   type ServiceDependencies,
 } from './service';
+import {
+  persistInstallCounts,
+  scrapeSkillsShInstalls,
+  type CloudflareD1Config,
+} from './installs-scraper';
 
 interface ScannerAppDependencies extends ServiceDependencies {
   backgroundRunner?: (task: Promise<unknown>) => void;
@@ -40,6 +45,28 @@ export function createScannerApp(dependencies: ScannerAppDependencies = {}) {
       return c.json({
         success: true,
         ...result,
+      });
+    } catch (error) {
+      return handleRouteError(c, error);
+    }
+  });
+
+  app.post('/scrape-installs', async (c) => {
+    try {
+      authorizeMutationRequest(c.req.header('authorization'), authToken);
+      const d1Config = readCloudflareD1ConfigFromEnv();
+      const scrapeResult = await scrapeSkillsShInstalls();
+      const persistResult = await persistInstallCounts(d1Config, scrapeResult.records, {
+        scrapedAt: scrapeResult.scrapedAt,
+      });
+
+      return c.json({
+        started: true,
+        completed: true,
+        scraped: scrapeResult.records.length,
+        attempted: persistResult.attempted,
+        updated: persistResult.updated,
+        scrapedAt: scrapeResult.scrapedAt,
       });
     } catch (error) {
       return handleRouteError(c, error);
@@ -104,6 +131,21 @@ function defaultBackgroundRunner(task: Promise<unknown>) {
   task.catch((error) => {
     console.error('[scrape] Background scrape failed', error);
   });
+}
+
+function readCloudflareD1ConfigFromEnv(): CloudflareD1Config {
+  const accountId = requireEnv('CF_ACCOUNT_ID');
+  const apiToken = requireEnv('CF_API_TOKEN');
+  const databaseId = requireEnv('D1_DATABASE_ID');
+  return { accountId, apiToken, databaseId };
+}
+
+function requireEnv(name: string) {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+  return value;
 }
 
 function parseOptionalInteger(value: string | undefined) {
